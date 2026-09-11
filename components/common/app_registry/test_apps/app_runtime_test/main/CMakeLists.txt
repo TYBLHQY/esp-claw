@@ -4,9 +4,7 @@ idf_component_register(
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
-        cap_skill_mgr
-        claw_cap
-        claw_skill
+        app_registry
         fatfs
         unity
         wear_levelling

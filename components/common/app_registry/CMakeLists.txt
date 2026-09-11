@@ -1,10 +1,9 @@
 idf_component_register(
     SRCS
-        "src/claw_launcher.c"
+        "src/app_registry.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
-        claw_skill
         freertos
         espressif__cjson
 )

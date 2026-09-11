@@ -110,7 +110,7 @@ This walkthrough uses sample app `application/edge_agent`, covering entry <LinkT
 ## Filesystem layout
 
 <FileTree>
-- fatfs
+- DATA
   - sessions
     - ... session history
   - memory
@@ -125,6 +125,10 @@ This walkthrough uses sample app `application/edge_agent`, covering entry <LinkT
     - skill_id
       - SKILL.md Skill metadata and body
       - scripts/ Skill-bundled scripts (optional)
+  - apps
+    - app_id
+      - launcher.json App metadata and Lua entry
+      - scripts/ App scripts
   - scripts
     - ... Lua scripts
   - router_rules

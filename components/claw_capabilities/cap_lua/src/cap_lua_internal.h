@@ -35,7 +35,6 @@ typedef struct {
     char path[CAP_LUA_JOB_PATH_MAX];
     char name[CAP_LUA_JOB_NAME_MAX];
     char exclusive[CAP_LUA_JOB_EXCLUSIVE_MAX];
-    char skill_id[CAP_LUA_JOB_SKILL_ID_MAX];
     char *args_json;
     uint32_t timeout_ms;
     size_t log_bytes;

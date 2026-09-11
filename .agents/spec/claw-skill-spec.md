@@ -11,7 +11,6 @@ component_xx/
 └── skills/
     └── skill_id/
         ├── SKILL.md
-        ├── launcher.json
         ├── references/
         │   └── guide.md
         ├── scripts/
@@ -24,7 +23,7 @@ Notes:
 
 - `skills/<skill_id>/` is one complete skill.
 - `SKILL.md` is the only required file.
-- `launcher.json`, `references/`, `scripts/`, `assets/`, and other files or subdirectories are optional.
+- `references/`, `scripts/`, `assets/`, and other files or subdirectories are optional.
 - The whole skill directory is packaged as one skill and copied unchanged into `skills/<skill_id>/` in the application SYSTEM file image.
 
 ## SKILL.md Rules
@@ -85,39 +84,6 @@ Example:
 ```json
 "description": "Turn the board LED strip/light on or off, set color or brightness. Requires board_hardware_info skill."
 ```
-
-## Launcher Definition
-
-`launcher.json` is an optional ESP-Claw attachment that exposes a skill-owned Lua script as a directly launchable System UI app. It is separate from `SKILL.md` and does not affect how the agent discovers or activates the skill.
-
-When present, `launcher.json` must contain a JSON object with this structure:
-
-```json
-{
-  "schema_version": 1,
-  "entry": "scripts/light_switch.lua",
-  "icon": "assets/icon.jpg",
-  "display_name": "my app",
-  "args": {},
-  "order": 10,
-  "visible": true
-}
-```
-
-Rules:
-
-- `schema_version` is required and must be `1`.
-- `entry` is required. It must be a skill-owned relative `.lua` path such as `scripts/light_switch.lua`.
-- `icon` is optional. It must be a skill-owned relative `.jpg` or `.jpeg` path. System UI decodes it to its fixed launcher icon size at runtime.
-- `display_name` is optional. It must be a non-empty string. It defaults to the skill id.
-- `args` is optional. It must be a JSON object and is passed to the launcher script as compact JSON.
-- `order` is optional and must be an integer. Lower values appear earlier in the launcher.
-- `visible` is optional and must be a boolean. It defaults to `true`; set it to `false` to keep the launcher definition without showing the app.
-- Unknown properties are ignored so newer launcher definitions remain compatible with older runtimes.
-- Launcher paths must not be absolute, contain `..`, or escape the skill directory.
-- The launcher uses `display_name` as the app title, falling back to the skill id.
-- A missing or invalid `launcher.json`, or a missing `entry` file, disables only the launcher entry and does not prevent the skill from being published.
-- A missing `icon` file falls back to the default launcher icon without disabling the launcher entry.
 
 ## Build Sync Rules
 

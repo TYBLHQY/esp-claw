@@ -4,8 +4,8 @@ dependencies:
     path: ../../claw_modules/claw_cap
   claw_core:
     path: ../../claw_modules/claw_core
-  claw_launcher:
-    path: ../../claw_modules/claw_launcher
+  app_registry:
+    path: ../app_registry
   display_service:
     path: ../display_service
   espressif/esp_new_jpeg: "*"

@@ -57,7 +57,7 @@ A successful publication returns a fixed-size result so large metadata cannot ma
 {"ok":true,"skill_id":"weather_alerts"}
 ```
 
-Launcher configuration is not part of this tool. An existing `launcher.json` is reloaded by the Launcher registry after the Skill registry changes.
+Apps and Skills use independent directories and registries. `publish_skill` does not create, update, or reload Apps.
 
 ## `remove_skill`
 
@@ -67,7 +67,7 @@ Input:
 {"skill_id":"weather_alerts"}
 ```
 
-Only runtime Skills under the writable root may be removed; System Skills are rejected. The implementation directly removes the entire Skill directory recursively, including `SKILL.md`, `launcher.json`, scripts, references, and assets, then refreshes the registry. The deletion is not transactional and is not rolled back; a filesystem error may leave the directory partially removed.
+Only runtime Skills under the writable root may be removed; System Skills are rejected. The implementation directly removes the entire Skill directory recursively, including `SKILL.md`, scripts, references, and assets, then refreshes the registry. Apps use separate directories and are unaffected by Skill removal. The deletion is not transactional and is not rolled back; a filesystem error may leave the directory partially removed.
 
 Successful result:
 

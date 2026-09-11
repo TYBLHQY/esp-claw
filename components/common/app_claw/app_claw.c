@@ -41,8 +41,10 @@
 #include "claw_memory.h"
 #endif
 #if CONFIG_APP_CLAW_CAP_SKILL_MGR
-#include "claw_launcher.h"
 #include "claw_skill.h"
+#endif
+#if CONFIG_APP_CLAW_CAP_LUA
+#include "app_registry.h"
 #endif
 #include "esp_check.h"
 #include "esp_log.h"
@@ -392,7 +394,7 @@ static esp_err_t app_claw_lua_jobs_stop_all_cb(void *user_ctx)
     return err;
 }
 
-static bool app_claw_launcher_action_is_lua_script(const char *action)
+static bool app_claw_app_action_is_lua_script(const char *action)
 {
     size_t len;
 
@@ -403,27 +405,25 @@ static bool app_claw_launcher_action_is_lua_script(const char *action)
     return len > 4 && strcmp(action + len - 4, ".lua") == 0;
 }
 
-static void app_claw_launcher_select_cb(const system_ui_launcher_item_t *selection, void *user_ctx)
+static void app_claw_app_select_cb(const system_ui_launcher_item_t *selection, void *user_ctx)
 {
     char output[APP_CLAW_LAUNCHER_OUTPUT_LEN] = {0};
 
     (void)user_ctx;
-    if (selection == NULL || !app_claw_launcher_action_is_lua_script(selection->action)) {
+    if (selection == NULL || !app_claw_app_action_is_lua_script(selection->action)) {
         ESP_LOGW(TAG, "invalid launcher action: %s",
                  selection && selection->action ? selection->action : "(null)");
         return;
     }
 
-    const cap_lua_async_config_t config = {
-        .path = selection->action,
-        .args_json = selection->args_json,
-        .name = selection->id,
-        .exclusive = "display",
-        .skill_id = selection->id,
-        .timeout_ms = 0,
-        .replace = true,
-    };
-    esp_err_t err = cap_lua_run_script_async_ex(&config, output, sizeof(output));
+    esp_err_t err = cap_lua_run_script_async(selection->action,
+                                             selection->args_json,
+                                             0,
+                                             selection->id,
+                                             "display",
+                                             true,
+                                             output,
+                                             sizeof(output));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "launcher action failed: title=%s action=%s err=%s output=%s",
                  selection->title ? selection->title : "(null)",
@@ -577,7 +577,7 @@ esp_err_t app_claw_ui_start(void)
     ESP_RETURN_ON_ERROR(system_ui_start(NULL), TAG, "start system UI failed");
 #if CONFIG_APP_CLAW_CAP_LUA
     const system_ui_callbacks_t callbacks = {
-        .on_launcher_select = app_claw_launcher_select_cb,
+        .on_launcher_select = app_claw_app_select_cb,
         .get_tasks = app_claw_lua_jobs_provider,
         .on_stop_task = app_claw_lua_job_stop_cb,
         .on_stop_all_tasks = app_claw_lua_jobs_stop_all_cb,
@@ -655,9 +655,8 @@ static esp_err_t init_memory(const app_claw_config_t *config,
 }
 #endif
 
-#if CONFIG_APP_CLAW_CAP_SKILL_MGR
-#if CONFIG_APP_CLAW_SYSTEM_UI_ENABLE
-static void app_claw_launcher_changed_cb(void *user_ctx)
+#if CONFIG_APP_CLAW_SYSTEM_UI_ENABLE && CONFIG_APP_CLAW_CAP_LUA
+static void app_claw_registry_changed_cb(void *user_ctx)
 {
     (void)user_ctx;
     if (!system_ui_is_started()) {
@@ -670,6 +669,7 @@ static void app_claw_launcher_changed_cb(void *user_ctx)
 }
 #endif
 
+#if CONFIG_APP_CLAW_CAP_SKILL_MGR
 static esp_err_t init_skills(const app_claw_storage_paths_t *paths)
 {
     ESP_RETURN_ON_ERROR(claw_skill_init(&(claw_skill_config_t) {
@@ -680,12 +680,20 @@ static esp_err_t init_skills(const app_claw_storage_paths_t *paths)
     /* Writable skills take priority over firmware-baked skills. */
     ESP_RETURN_ON_ERROR(claw_skill_add_directory(paths->skills_root_dir), TAG, "Failed to add skills directory");
     ESP_RETURN_ON_ERROR(claw_skill_add_directory(paths->system_skills_root_dir), TAG, "Failed to add system skills directory");
-    ESP_RETURN_ON_ERROR(claw_skill_reload_registry(), TAG, "Failed to reload skill registry");
-    ESP_RETURN_ON_ERROR(claw_launcher_init(), TAG, "Failed to init launcher registry");
-#if CONFIG_APP_CLAW_SYSTEM_UI_ENABLE
-    ESP_RETURN_ON_ERROR(claw_launcher_register_changed_cb(app_claw_launcher_changed_cb, NULL), TAG, "Failed to register launcher listener");
+    return claw_skill_reload_registry();
+}
 #endif
-    return claw_launcher_reload();
+
+#if CONFIG_APP_CLAW_CAP_LUA
+static esp_err_t init_apps(const app_claw_storage_paths_t *paths)
+{
+    ESP_RETURN_ON_ERROR(app_registry_init(), TAG, "Failed to init App registry");
+    ESP_RETURN_ON_ERROR(app_registry_add_directory(paths->apps_root_dir), TAG, "Failed to add writable App directory");
+    ESP_RETURN_ON_ERROR(app_registry_add_directory(paths->system_apps_root_dir), TAG, "Failed to add system App directory");
+#if CONFIG_APP_CLAW_SYSTEM_UI_ENABLE
+    ESP_RETURN_ON_ERROR(app_registry_register_changed_cb(app_claw_registry_changed_cb, NULL), TAG, "Failed to register App listener");
+#endif
+    return app_registry_reload();
 }
 #endif
 
@@ -781,6 +789,8 @@ static esp_err_t build_storage_paths(app_claw_storage_paths_t *paths)
                         TAG, "memory root path too long");
     ESP_RETURN_ON_ERROR(claw_paths_join(CLAW_PATH_DATA, "skills", paths->skills_root_dir, sizeof(paths->skills_root_dir)),
                         TAG, "skills root path too long");
+    ESP_RETURN_ON_ERROR(claw_paths_join(CLAW_PATH_DATA, "apps", paths->apps_root_dir, sizeof(paths->apps_root_dir)),
+                        TAG, "App root path too long");
     ESP_RETURN_ON_ERROR(claw_paths_join(CLAW_PATH_DATA, "scripts", paths->lua_root_dir, sizeof(paths->lua_root_dir)),
                         TAG, "lua root path too long");
     ESP_RETURN_ON_ERROR(claw_paths_join(CLAW_PATH_DATA, "router_rules/router_rules.json", paths->router_rules_path, sizeof(paths->router_rules_path)),
@@ -796,6 +806,8 @@ static esp_err_t build_storage_paths(app_claw_storage_paths_t *paths)
 
     ESP_RETURN_ON_ERROR(claw_paths_join(CLAW_PATH_SYSTEM, "skills", paths->system_skills_root_dir, sizeof(paths->system_skills_root_dir)),
                         TAG, "system skills root path too long");
+    ESP_RETURN_ON_ERROR(claw_paths_join(CLAW_PATH_SYSTEM, "apps", paths->system_apps_root_dir, sizeof(paths->system_apps_root_dir)),
+                        TAG, "system App root path too long");
 
     return ESP_OK;
 }
@@ -870,6 +882,9 @@ esp_err_t app_claw_start(const app_claw_config_t *config)
 #endif
 #if CONFIG_APP_CLAW_CAP_SKILL_MGR
     ESP_RETURN_ON_ERROR(init_skills(&paths), TAG, "Failed to init skills");
+#endif
+#if CONFIG_APP_CLAW_CAP_LUA
+    ESP_RETURN_ON_ERROR(init_apps(&paths), TAG, "Failed to init Apps");
 #endif
     ESP_RETURN_ON_ERROR(app_capabilities_init(config, &paths), TAG, "Failed to init capabilities");
 #if CONFIG_APP_CLAW_CAP_IM_QQ
