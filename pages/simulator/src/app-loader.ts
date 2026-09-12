@@ -12,7 +12,6 @@ const MODULE_PERIPHERALS: Record<string, string> = {
   gpio: 'gpio',
   ir: 'ir',
   lcd: 'display',
-  lcd_touch: 'display',
   led_strip: 'ws2812',
   lvgl: 'display',
   mcpwm: 'motor',

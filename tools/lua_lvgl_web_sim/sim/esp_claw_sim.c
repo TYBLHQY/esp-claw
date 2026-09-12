@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include <ctype.h>
 #include <math.h>
 #include <stdbool.h>
@@ -36,7 +41,6 @@ static char s_display_owner[16];
 static bool s_lvgl_init_claim;
 static const uintptr_t SIM_PANEL_HANDLE = 0xEC1A0001u;
 static const uintptr_t SIM_IO_HANDLE = 0xEC1A0002u;
-static const uintptr_t SIM_TOUCH_HANDLE = 0xEC1A0003u;
 static const uintptr_t SIM_AUDIO_CODEC_HANDLE = 0xEC1A0004u;
 
 static bool sim_stop_requested(void)
@@ -574,13 +578,6 @@ static int lua_board_get_display_lcd_params(lua_State *L)
     return 5;
 }
 
-static int lua_board_get_lcd_touch_handle(lua_State *L)
-{
-    (void)luaL_optstring(L, 1, "lcd_touch");
-    lua_pushlightuserdata(L, (void *)SIM_TOUCH_HANDLE);
-    return 1;
-}
-
 static int lua_board_get_audio_codec_output_params(lua_State *L)
 {
     (void)luaL_optstring(L, 1, "audio_dac");
@@ -606,8 +603,6 @@ static int luaopen_board_manager(lua_State *L)
     lua_newtable(L);
     lua_pushcfunction(L, lua_board_get_display_lcd_params);
     lua_setfield(L, -2, "get_display_lcd_params");
-    lua_pushcfunction(L, lua_board_get_lcd_touch_handle);
-    lua_setfield(L, -2, "get_lcd_touch_handle");
     lua_pushcfunction(L, lua_board_get_audio_codec_output_params);
     lua_setfield(L, -2, "get_audio_codec_output_params");
     lua_pushcfunction(L, lua_board_get_camera_paths);
@@ -2193,58 +2188,6 @@ static int luaopen_http_server(lua_State *L)
     return 1;
 }
 
-static int lua_lcd_touch_sync(lua_State *L)
-{
-    luaL_checktype(L, 1, LUA_TLIGHTUSERDATA);
-    lua_pushboolean(L, 1);
-    return 1;
-}
-
-static int lua_lcd_touch_poll(lua_State *L)
-{
-    bool had_event;
-    bool pressed;
-    int x;
-    int y;
-
-    luaL_checktype(L, 1, LUA_TLIGHTUSERDATA);
-    had_event = sim_take_touch_event();
-    if (had_event) {
-        x = sim_polled_touch_x();
-        y = sim_polled_touch_y();
-        pressed = sim_polled_touch_pressed();
-    } else {
-        x = EM_ASM_INT({ return Module.__touchState ? (Module.__touchState.x | 0) : 0; });
-        y = EM_ASM_INT({ return Module.__touchState ? (Module.__touchState.y | 0) : 0; });
-        pressed = EM_ASM_INT({ return Module.__touchState && Module.__touchState.pressed ? 1 : 0; }) != 0;
-    }
-
-    lua_newtable(L);
-    lua_pushboolean(L, pressed);
-    lua_setfield(L, -2, "pressed");
-    lua_pushboolean(L, had_event && pressed);
-    lua_setfield(L, -2, "just_pressed");
-    lua_pushboolean(L, had_event && !pressed);
-    lua_setfield(L, -2, "just_released");
-    lua_pushinteger(L, x);
-    lua_setfield(L, -2, "x");
-    lua_pushinteger(L, y);
-    lua_setfield(L, -2, "y");
-    return 1;
-}
-
-static int luaopen_lcd_touch(lua_State *L)
-{
-    static const luaL_Reg funcs[] = {
-        {"sync", lua_lcd_touch_sync},
-        {"poll", lua_lcd_touch_poll},
-        {NULL, NULL},
-    };
-    lua_newtable(L);
-    luaL_setfuncs(L, funcs, 0);
-    return 1;
-}
-
 static int lua_display_init(lua_State *L)
 {
     if (s_display_owner[0] == '\0') {
@@ -2782,6 +2725,26 @@ static int lua_display_clear_clip_rect(lua_State *L)
     return 1;
 }
 
+static int lua_display_touch_read(lua_State *L)
+{
+    require_display(L);
+    (void)sim_take_touch_event();
+    bool pressed = sim_polled_touch_pressed();
+
+    lua_createtable(L, pressed ? 1 : 0, 0);
+    if (pressed) {
+        lua_createtable(L, 0, 3);
+        lua_pushinteger(L, sim_polled_touch_id());
+        lua_setfield(L, -2, "id");
+        lua_pushinteger(L, sim_polled_touch_x());
+        lua_setfield(L, -2, "x");
+        lua_pushinteger(L, sim_polled_touch_y());
+        lua_setfield(L, -2, "y");
+        lua_rawseti(L, -2, 1);
+    }
+    return 1;
+}
+
 static int luaopen_display(lua_State *L)
 {
     static const luaL_Reg funcs[] = {
@@ -2826,6 +2789,10 @@ static int luaopen_display(lua_State *L)
     lua_setfield(L, -2, "width");
     lua_pushinteger(L, sim_canvas_height());
     lua_setfield(L, -2, "height");
+    lua_newtable(L);
+    lua_pushcfunction(L, lua_display_touch_read);
+    lua_setfield(L, -2, "read");
+    lua_setfield(L, -2, "touch");
     return 1;
 }
 
@@ -2912,8 +2879,6 @@ static void sim_register_modules(lua_State *L)
     luaL_requiref(L, "touch", luaopen_touch, 1);
     lua_pop(L, 1);
     luaL_requiref(L, "system", luaopen_system, 1);
-    lua_pop(L, 1);
-    luaL_requiref(L, "lcd_touch", luaopen_lcd_touch, 1);
     lua_pop(L, 1);
     luaL_requiref(L, "display", luaopen_display, 1);
     lua_pop(L, 1);

@@ -80,24 +80,7 @@ lvgl.deinit() -> true
 
 ## Touch Input
 
-Register a touch panel as an LVGL input device:
-
-```lua
-local board_manager = require("board_manager")
-
-local touch_handle, err = board_manager.get_lcd_touch_handle("lcd_touch")
-if touch_handle then
-    lvgl.indev_register("touch", touch_handle) -- -> true
-end
-```
-
-Unregister it before shutdown when needed:
-
-```lua
-lvgl.indev_unregister("touch") -- -> removed
-```
-
-`indev_register("touch", ...)` does not take ownership of the touch handle. `indev_unregister("touch")` returns `true` only when a touch input device was actually removed.
+The board's LCD touch device is connected automatically. After `lvgl.init(...)`, widgets receive touch events without registering an input handle.
 
 ## Event Loop
 

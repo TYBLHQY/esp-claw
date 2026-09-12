@@ -227,12 +227,6 @@ typedef struct {
     lv_fs_drv_t fs_drv;
     char data_root[LUA_MODULE_LVGL_PATH_MAX];
     bool fs_registered;
-    /* P4: input devices. Only one indev of each kind is supported on a
-     * single-script runtime; the underlying esp_lcd_touch_handle_t is owned
-     * by board_manager, so we only borrow the pointer here and never free
-     * it when the LVGL runtime is torn down. */
-    lv_indev_t *touch_indev;
-    void *touch_handle;
 } lua_lvgl_state_t;
 
 typedef struct {
@@ -461,10 +455,4 @@ extern const luaL_Reg lua_lvgl_extra_widget_funcs[];
 extern const luaL_Reg lua_lvgl_complex_widget_funcs[];
 extern const luaL_Reg lua_lvgl_eaf_module_funcs[];
 extern const luaL_Reg lua_lvgl_event_module_funcs[];
-extern const luaL_Reg lua_lvgl_indev_module_funcs[];
 extern const luaL_Reg lua_lvgl_demo_module_funcs[];
-
-/* lua_lvgl_indev.c: tear down all currently registered indevs.
- * Caller must hold lua_lvgl_lock() and the LVGL task must already be
- * stopped (so no read_cb is running). */
-void lua_lvgl_indev_release_locked(void);

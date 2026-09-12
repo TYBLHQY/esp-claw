@@ -239,25 +239,26 @@ static void system_ui_stop_event_task(void)
     s_ui.event_task_stop = false;
 }
 
-static void system_ui_touch_observer_cb(const display_service_touch_sample_t *sample, void *user_ctx)
+static void system_ui_touch_observer_cb(const display_service_touch_snapshot_t *snapshot, void *user_ctx)
 {
     (void)user_ctx;
 
-    if (sample == NULL || !s_ui.started) {
+    if (snapshot == NULL || !s_ui.started) {
         return;
     }
-    if (sample->pressed) {
+    if (snapshot->count > 0) {
+        const display_service_touch_point_t *point = &snapshot->points[0];
         if (s_ui.touch_gesture == SYSTEM_UI_TOUCH_GESTURE_NONE) {
-            s_touch_start_x = sample->x;
-            s_touch_start_y = sample->y;
+            s_touch_start_x = point->x;
+            s_touch_start_y = point->y;
             if (!display_service_has_exclusive_session() && system_ui_system_overlay_allowed() &&
                     s_touch_start_y <= SYSTEM_UI_JOBS_SWIPE_EDGE_PX) {
                 s_ui.touch_gesture = SYSTEM_UI_TOUCH_GESTURE_SHOW_JOBS;
             }
         } else if (s_ui.touch_gesture == SYSTEM_UI_TOUCH_GESTURE_SHOW_JOBS &&
                    !s_ui.jobs_visible &&
-                   sample->y - s_touch_start_y >= SYSTEM_UI_JOBS_SWIPE_TRIGGER_PX &&
-                   system_ui_abs_i32(sample->x - s_touch_start_x) <= SYSTEM_UI_JOBS_SWIPE_HORIZONTAL_TOL_PX) {
+                   point->y - s_touch_start_y >= SYSTEM_UI_JOBS_SWIPE_TRIGGER_PX &&
+                   system_ui_abs_i32(point->x - s_touch_start_x) <= SYSTEM_UI_JOBS_SWIPE_HORIZONTAL_TOL_PX) {
             system_ui_work_event_t event = {
                 .type = SYSTEM_UI_WORK_EVENT_SHOW_JOBS,
                 .generation = s_ui.generation,

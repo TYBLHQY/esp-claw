@@ -11,6 +11,7 @@
 
 #include "esp_err.h"
 #include "lvgl.h"
+#include "sdkconfig.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,12 +68,18 @@ typedef struct {
 #define DISPLAY_SERVICE_OWNER_NAME_LEN 32
 
 typedef struct {
-    bool pressed;
+    uint8_t id;
     int32_t x;
     int32_t y;
-} display_service_touch_sample_t;
+} display_service_touch_point_t;
 
-typedef void (*display_service_touch_observer_cb_t)(const display_service_touch_sample_t *sample,
+typedef struct {
+    uint8_t count;
+    display_service_touch_point_t points[CONFIG_ESP_LCD_TOUCH_MAX_POINTS];
+    uint32_t generation;
+} display_service_touch_snapshot_t;
+
+typedef void (*display_service_touch_observer_cb_t)(const display_service_touch_snapshot_t *snapshot,
                                                     void *user_ctx);
 typedef uint32_t display_service_touch_observer_handle_t;
 
@@ -103,6 +110,8 @@ esp_err_t display_service_session_load_screen_locked(display_service_session_han
 lv_display_t *display_service_session_display(display_service_session_handle_t session);
 esp_err_t display_service_session_raw_blit(display_service_session_handle_t session,
                                            const display_service_raw_blit_t *blit);
+esp_err_t display_service_session_get_touch_snapshot(display_service_session_handle_t session,
+                                                     display_service_touch_snapshot_t *snapshot);
 bool display_service_has_exclusive_session(void);
 bool display_service_exclusive_allows_system_overlay(void);
 

@@ -12,14 +12,13 @@ This module describes how to correctly use board_manager when writing Lua script
 - Use the built-in constants `board_manager.PANEL_IF_IO`, `board_manager.PANEL_IF_RGB`, `board_manager.PANEL_IF_MIPI_DSI`, `board_manager.PIXEL_FORMAT_RGB565`, and `board_manager.PIXEL_FORMAT_RGB888`
 - `panel_if` returned by `get_display_lcd_params(...)` matches one of those constants
 - `pixel_format` returned by `get_display_lcd_params(...)` matches one of the pixel format constants
-- Call `board_manager.get_lcd_touch_handle(name)` to get the raw LCD touch handle
 - Call `board_manager.get_audio_codec_input_params(name)` or `board_manager.get_audio_codec_output_params(name)` to get codec handles and format parameters
 - Call `board_manager.get_camera_paths()` to get camera device paths such as `dev_path` and `meta_path`
 
 ## Return values
 - `get_board_info()` returns a metadata table.
 - `init_device(name)` and `deinit_device(name)` return `true` on success or `nil, err` on failure.
-- `get_device_handle(name)`, `get_device_config_handle(name)`, and `get_lcd_touch_handle(name)` return a lightuserdata handle or `nil, err`.
+- `get_device_handle(name)` and `get_device_config_handle(name)` return a lightuserdata handle or `nil, err`.
 - `get_display_lcd_params(name)` returns `panel_handle, io_handle, lcd_width, lcd_height, panel_if, pixel_format`.
 - `get_audio_codec_input_params(name)` returns `codec_handle, sample_rate, channels, bits, init_gain_db`.
 - `get_audio_codec_output_params(name)` returns `codec_handle, sample_rate, channels, bits`.

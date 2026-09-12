@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "lua_module_display.h"
+#include "lua_display_touch.h"
 
 #include "cap_lua.h"
 #include "display_service.h"
@@ -1331,6 +1332,7 @@ int luaopen_display(lua_State *L)
     lua_pushinteger(L, DISPLAY_HAL_PIXEL_FORMAT_RGB888);
     lua_setfield(L, -2, "PIXEL_FORMAT_RGB888");
 
+    lua_display_touch_register_lua(L, &s_display_session);
     lua_display_set_module_metatable(L);
     return 1;
 }
