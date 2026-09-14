@@ -179,8 +179,7 @@ esp_err_t cap_lua_resolve_run_path(const char *path, char *resolved, size_t reso
         ESP_LOGE(TAG, "resolve_run_path: invalid arg");
         return ESP_ERR_INVALID_ARG;
     }
-    /* Run tools only accept absolute .lua paths; the script's mount point is unrestricted so a
-     * caller can run a script from /fatfs/scripts, /fatfs/skills, /fatfs/temp (RAMFS), etc. */
+    /* Run tools accept absolute .lua paths from any mounted storage root. */
     if (!cap_lua_run_path_is_valid(path)) {
         ESP_LOGE(TAG, "resolve_run_path: path must be an absolute .lua path: %s", path);
         return ESP_ERR_INVALID_ARG;
@@ -328,7 +327,6 @@ static esp_err_t cap_lua_run_script_async_execute(const char *input_json,
     const char *path = NULL;
     const char *name = NULL;
     const char *exclusive = NULL;
-    const char *skill_id = NULL;
     char resolved_path[192];
     cJSON *timeout_item = NULL;
     cJSON *log_bytes_item = NULL;
@@ -400,12 +398,6 @@ static esp_err_t cap_lua_run_script_async_execute(const char *input_json,
 
     name = cJSON_GetStringValue(cJSON_GetObjectItem(root, "name"));
     exclusive = cJSON_GetStringValue(cJSON_GetObjectItem(root, "exclusive"));
-    skill_id = cJSON_GetStringValue(cJSON_GetObjectItem(root, "skill_id"));
-    if (skill_id && strlen(skill_id) >= CAP_LUA_JOB_SKILL_ID_MAX) {
-        cJSON_Delete(root);
-        snprintf(output, output_size, "Error: skill_id is too long");
-        return ESP_ERR_INVALID_ARG;
-    }
     replace_item = cJSON_GetObjectItem(root, "replace");
     if (cJSON_IsBool(replace_item)) {
         replace = cJSON_IsTrue(replace_item);
@@ -423,10 +415,6 @@ static esp_err_t cap_lua_run_script_async_execute(const char *input_json,
     if (exclusive && exclusive[0]) {
         strlcpy(job.exclusive, exclusive, sizeof(job.exclusive));
     }
-    if (skill_id && skill_id[0]) {
-        strlcpy(job.skill_id, skill_id, sizeof(job.skill_id));
-    }
-
     err = cap_lua_build_args_json(root, &args_json);
     cJSON_Delete(root);
     if (err != ESP_OK) {
@@ -728,7 +716,7 @@ static const claw_cap_descriptor_t s_lua_descriptors[] = {
         "\"additionalProperties\":true},"
         "\"timeout_ms\":{\"type\":\"integer\",\"minimum\":0},\"log_bytes\":{\"type\":\"integer\","
         "\"minimum\":1024,\"maximum\":16384},\"name\":{\"type\":\"string\"},"
-        "\"exclusive\":{\"type\":\"string\"},\"skill_id\":{\"type\":\"string\"},"
+        "\"exclusive\":{\"type\":\"string\"},"
         "\"replace\":{\"type\":\"boolean\"}},\"required\":[\"path\"]}",
         .execute = cap_lua_run_script_async_execute,
     },
@@ -873,27 +861,12 @@ esp_err_t cap_lua_run_script_async(const char *path,
                                    char *output,
                                    size_t output_size)
 {
-    const cap_lua_async_config_t config = {
-        .path = path,
-        .args_json = args_json,
-        .name = name,
-        .exclusive = exclusive,
-        .timeout_ms = timeout_ms,
-        .replace = replace,
-    };
-    return cap_lua_run_script_async_ex(&config, output, output_size);
-}
-
-esp_err_t cap_lua_run_script_async_ex(const cap_lua_async_config_t *config,
-                                      char *output,
-                                      size_t output_size)
-{
     cJSON *root = NULL;
     cJSON *args = NULL;
     char *input_json = NULL;
     esp_err_t err = ESP_OK;
 
-    if (!config || !config->path || !output || output_size == 0) {
+    if (!path || !output || output_size == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -901,12 +874,12 @@ esp_err_t cap_lua_run_script_async_ex(const cap_lua_async_config_t *config,
     if (!root) {
         return ESP_ERR_NO_MEM;
     }
-    if (!cJSON_AddStringToObject(root, "path", config->path)) {
+    if (!cJSON_AddStringToObject(root, "path", path)) {
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
     }
-    if (config->args_json && config->args_json[0]) {
-        args = cJSON_Parse(config->args_json);
+    if (args_json && args_json[0]) {
+        args = cJSON_Parse(args_json);
         if (!args || !cJSON_IsObject(args)) {
             cJSON_Delete(args);
             cJSON_Delete(root);
@@ -914,26 +887,19 @@ esp_err_t cap_lua_run_script_async_ex(const cap_lua_async_config_t *config,
         }
         cJSON_AddItemToObject(root, "args", args);
     }
-    if (!cJSON_AddNumberToObject(root, "timeout_ms", (double)config->timeout_ms)) {
+    if (!cJSON_AddNumberToObject(root, "timeout_ms", (double)timeout_ms)) {
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
     }
-    if (config->name && config->name[0] &&
-            !cJSON_AddStringToObject(root, "name", config->name)) {
+    if (name && name[0] && !cJSON_AddStringToObject(root, "name", name)) {
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
     }
-    if (config->exclusive && config->exclusive[0] &&
-            !cJSON_AddStringToObject(root, "exclusive", config->exclusive)) {
+    if (exclusive && exclusive[0] && !cJSON_AddStringToObject(root, "exclusive", exclusive)) {
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
     }
-    if (config->skill_id && config->skill_id[0] &&
-            !cJSON_AddStringToObject(root, "skill_id", config->skill_id)) {
-        cJSON_Delete(root);
-        return ESP_ERR_NO_MEM;
-    }
-    if (config->replace && !cJSON_AddBoolToObject(root, "replace", true)) {
+    if (replace && !cJSON_AddBoolToObject(root, "replace", true)) {
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
     }

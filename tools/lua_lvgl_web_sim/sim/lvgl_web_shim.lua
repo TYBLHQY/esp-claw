@@ -8,7 +8,6 @@ local state = {
     width = 800,
     height = 480,
     screen = nil,
-    indev = {},
     pressed_target = nil,
     scroll_target = nil,
     pointer_y = nil,
@@ -710,22 +709,6 @@ end
 
 function lvgl.run()
     return 0
-end
-
-function lvgl.indev_register(name)
-    if state.indev[name] then
-        error("lvgl indev already registered")
-    end
-    state.indev[name] = true
-    return true
-end
-
-function lvgl.indev_unregister(name)
-    if not state.indev[name] then
-        return false
-    end
-    state.indev[name] = nil
-    return true
 end
 
 function lvgl.demos()

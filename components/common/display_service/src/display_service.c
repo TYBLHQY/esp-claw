@@ -94,6 +94,7 @@ typedef struct {
     lv_obj_t *dummy_input_blocker;
     SemaphoreHandle_t dummy_mutex;
     const char *dummy_owner;
+    display_service_touch_snapshot_t touch_snapshot;
     display_service_touch_observer_t touch_observers[DISPLAY_SERVICE_MAX_TOUCH_OBSERVERS];
     display_service_state_observer_cb_t state_observer_cb;
     void *state_observer_user_ctx;
@@ -161,22 +162,24 @@ static struct display_service_session_t *display_service_active_exclusive_sessio
 }
 
 static bool display_service_process_exit_gesture(struct display_service_session_t *session,
-                                                 const display_service_touch_sample_t *sample,
+                                                 const display_service_touch_snapshot_t *snapshot,
                                                  int32_t display_height)
 {
-    if (!display_service_session_valid_unlocked(session) || sample == NULL || display_height <= 0) {
+    if (!display_service_session_valid_unlocked(session) || snapshot == NULL || display_height <= 0) {
         return false;
     }
 
-    if (sample->pressed && !session->exit_gesture_tracking) {
+    bool pressed = snapshot->count > 0;
+    int32_t y = pressed ? snapshot->points[0].y : 0;
+    if (pressed && !session->exit_gesture_tracking) {
         session->exit_gesture_tracking = true;
         session->exit_gesture_captured = false;
         session->exit_request_sent = false;
-        session->exit_gesture_start_y = sample->y;
+        session->exit_gesture_start_y = y;
     }
-    if (sample->pressed && session->exit_gesture_tracking &&
+    if (pressed && session->exit_gesture_tracking &&
             session->exit_gesture_start_y >= display_height - DISPLAY_SERVICE_EXIT_GESTURE_START_HEIGHT &&
-            session->exit_gesture_start_y - sample->y >= DISPLAY_SERVICE_EXIT_GESTURE_MIN_DY) {
+            session->exit_gesture_start_y - y >= DISPLAY_SERVICE_EXIT_GESTURE_MIN_DY) {
         session->exit_gesture_captured = true;
     }
 
@@ -186,7 +189,7 @@ static bool display_service_process_exit_gesture(struct display_service_session_
         ESP_LOGI(TAG, "display shell exit gesture: owner=%s", session->owner_name);
         session->exit_request_cb(session, session->cleanup_user_ctx);
     }
-    if (!sample->pressed) {
+    if (!pressed) {
         session->exit_gesture_tracking = false;
         session->exit_gesture_captured = false;
     }
@@ -336,14 +339,14 @@ static uint32_t display_service_next_touch_observer_generation(void)
     return s_display.touch_observer_generation;
 }
 
-static void display_service_notify_touch_observer(const display_service_touch_sample_t *sample)
+static void display_service_notify_touch_observers(const display_service_touch_snapshot_t *snapshot)
 {
-    if (sample == NULL) {
+    if (snapshot == NULL) {
         return;
     }
     for (size_t i = 0; i < DISPLAY_SERVICE_MAX_TOUCH_OBSERVERS; i++) {
         if (s_display.touch_observers[i].active && s_display.touch_observers[i].cb != NULL) {
-            s_display.touch_observers[i].cb(sample, s_display.touch_observers[i].user_ctx);
+            s_display.touch_observers[i].cb(snapshot, s_display.touch_observers[i].user_ctx);
         }
     }
 }
@@ -488,38 +491,68 @@ static lv_display_t *display_service_register_adapter_display(const dev_display_
     return esp_lv_adapter_register_display(&disp_cfg);
 }
 
-static void display_service_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+static bool display_service_publish_touch_snapshot(const esp_lcd_touch_point_data_t *points, uint8_t count)
 {
-    esp_lcd_touch_handle_t tp = (esp_lcd_touch_handle_t)lv_indev_get_user_data(indev);
-    esp_lcd_touch_point_data_t point;
-    uint8_t point_count = 0;
-    display_service_touch_sample_t sample = {0};
+    display_service_touch_snapshot_t snapshot = {
+        .count = count,
+        .generation = s_display.touch_snapshot.generation + 1,
+    };
 
-    if (!tp) {
-        data->state = LV_INDEV_STATE_RELEASED;
-        display_service_notify_touch_observer(&sample);
-        return;
-    }
-    (void)esp_lcd_touch_read_data(tp);
-    if (esp_lcd_touch_get_data(tp, &point, &point_count, 1) == ESP_OK && point_count > 0) {
-        data->point.x = (int32_t)point.x;
-        data->point.y = (int32_t)point.y;
-        data->state = LV_INDEV_STATE_PRESSED;
-        sample.pressed = true;
-        sample.x = data->point.x;
-        sample.y = data->point.y;
-    } else {
-        data->state = LV_INDEV_STATE_RELEASED;
+    for (uint8_t i = 0; i < count; i++) {
+        snapshot.points[i].id = points[i].track_id;
+        snapshot.points[i].x = points[i].x;
+        snapshot.points[i].y = points[i].y;
     }
     struct display_service_session_t *session = display_service_active_exclusive_session();
-    const int32_t display_height = s_display.display != NULL ?
-        lv_display_get_vertical_resolution(s_display.display) : 0;
-    if (display_service_process_exit_gesture(session, &sample, display_height)) {
-        /* The gesture belongs to the display shell, not the active session. */
-        sample.pressed = false;
-        data->state = LV_INDEV_STATE_RELEASED;
+    int32_t display_height = s_display.display != NULL ? lv_display_get_vertical_resolution(s_display.display) : 0;
+    bool captured = display_service_process_exit_gesture(session, &snapshot, display_height);
+    if (captured) {
+        snapshot.count = 0;
     }
-    display_service_notify_touch_observer(&sample);
+
+    s_display.touch_snapshot = snapshot;
+    display_service_notify_touch_observers(&s_display.touch_snapshot);
+    return captured;
+}
+
+static esp_err_t display_service_touch_read_cb(esp_lcd_touch_handle_t tp,
+                                               esp_lcd_touch_point_data_t *points,
+                                               uint8_t *count,
+                                               uint8_t max_count,
+                                               void *user_ctx)
+{
+    /* The adapter invokes this callback from the LVGL task while holding its lock. */
+    (void)user_ctx;
+    if (tp == NULL || points == NULL || count == NULL || max_count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *count = 0;
+    esp_err_t err = esp_lcd_touch_read_data(tp);
+    if (err == ESP_OK) {
+        err = esp_lcd_touch_get_data(tp, points, count, max_count);
+    }
+    if (err != ESP_OK || *count > max_count) {
+        ESP_LOGW(TAG, "touch sample failed: %s", esp_err_to_name(err != ESP_OK ? err : ESP_ERR_INVALID_SIZE));
+        (void)display_service_publish_touch_snapshot(NULL, 0);
+        return err != ESP_OK ? err : ESP_ERR_INVALID_SIZE;
+    }
+
+    for (uint8_t i = 0; i < *count; i++) {
+        for (uint8_t j = 0; j < i; j++) {
+            if (points[i].track_id == points[j].track_id) {
+                ESP_LOGW(TAG, "touch sample has duplicate track ID: %u", points[i].track_id);
+                *count = 0;
+                (void)display_service_publish_touch_snapshot(NULL, 0);
+                return ESP_ERR_INVALID_STATE;
+            }
+        }
+    }
+
+    if (display_service_publish_touch_snapshot(points, *count)) {
+        *count = 0;
+    }
+    return ESP_OK;
 }
 
 static esp_err_t display_service_load_board_display(dev_display_lcd_config_t **out_lcd_cfg,
@@ -643,19 +676,16 @@ esp_err_t display_service_start(const display_service_config_t *config)
     s_display.display = display_service_register_adapter_display(lcd_cfg, lcd_handles, buffer_lines);
     ESP_GOTO_ON_FALSE(s_display.display != NULL, ESP_FAIL, fail, TAG, "register LVGL adapter display failed");
 
-    ESP_GOTO_ON_ERROR(display_service_lock(), fail, TAG, "lock failed");
     if (s_display.touch) {
-        s_display.touch_indev = lv_indev_create();
-        if (s_display.touch_indev) {
-            lv_indev_set_type(s_display.touch_indev, LV_INDEV_TYPE_POINTER);
-            lv_indev_set_read_cb(s_display.touch_indev, display_service_touch_read_cb);
-            lv_indev_set_user_data(s_display.touch_indev, s_display.touch);
-            lv_indev_set_display(s_display.touch_indev, s_display.display);
-        } else {
-            ESP_LOGW(TAG, "touch disabled: lv_indev_create failed");
-        }
+        esp_lv_adapter_touch_config_t touch_config = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(s_display.display, s_display.touch);
+#if CONFIG_ESP_LCD_TOUCH_MAX_POINTS > 1
+        touch_config.multi_touch.mode = ESP_LV_ADAPTER_TOUCH_MODE_MULTI_CONTROL;
+        touch_config.multi_touch.pointers = CONFIG_ESP_LCD_TOUCH_MAX_POINTS;
+#endif
+        touch_config.callbacks.custom_touch_read = display_service_touch_read_cb;
+        s_display.touch_indev = esp_lv_adapter_register_touch(&touch_config);
+        ESP_GOTO_ON_FALSE(s_display.touch_indev != NULL, ESP_FAIL, fail, TAG, "register touch input failed");
     }
-    display_service_unlock();
 
     ESP_GOTO_ON_ERROR(esp_lv_adapter_start(), fail, TAG, "start LVGL adapter failed");
     s_display.adapter_started = true;
@@ -671,29 +701,21 @@ fail:
 
 void display_service_stop(void)
 {
-    /* Release the compositor/display leases first; each is guarded so this
-     * is also safe when start() failed before acquiring them. */
-    if (s_lcd_touch_lease) {
-        claw_hw_release(s_lcd_touch_lease);
-        s_lcd_touch_lease = NULL;
-    }
-    if (s_display_lcd_lease) {
-        claw_hw_release(s_display_lcd_lease);
-        s_display_lcd_lease = NULL;
-    }
-
     if (s_display.adapter_initialized && display_service_lock() == ESP_OK) {
         s_display.started = false;
         display_service_delete_dummy_input_blocker_locked();
-        if (s_display.touch_indev) {
-            lv_indev_delete(s_display.touch_indev);
-            s_display.touch_indev = NULL;
-        }
         display_service_clear_scene_locked();
         memset(s_display.clients, 0, sizeof(s_display.clients));
         memset(s_display.sessions, 0, sizeof(s_display.sessions));
         s_display.client_count = 0;
         display_service_unlock();
+    }
+    if (s_display.touch_indev) {
+        esp_err_t err = esp_lv_adapter_unregister_touch(s_display.touch_indev);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "unregister touch input failed: %s", esp_err_to_name(err));
+        }
+        s_display.touch_indev = NULL;
     }
     if (s_display.dummy_draw_enabled && s_display.display) {
         (void)esp_lv_adapter_set_dummy_draw(s_display.display, false);
@@ -714,6 +736,7 @@ void display_service_stop(void)
     s_display.panel = NULL;
     s_display.io = NULL;
     s_display.touch = NULL;
+    memset(&s_display.touch_snapshot, 0, sizeof(s_display.touch_snapshot));
     s_display.dummy_owner = NULL;
     memset(s_display.touch_observers, 0, sizeof(s_display.touch_observers));
     s_display.state_observer_cb = NULL;
@@ -726,6 +749,14 @@ void display_service_stop(void)
     s_display.scene_flags = 0;
     s_display.dummy_draw_enabled = false;
     s_display.dummy_draw_suspended = false;
+    if (s_lcd_touch_lease) {
+        claw_hw_release(s_lcd_touch_lease);
+        s_lcd_touch_lease = NULL;
+    }
+    if (s_display_lcd_lease) {
+        claw_hw_release(s_display_lcd_lease);
+        s_display_lcd_lease = NULL;
+    }
 }
 
 bool display_service_is_started(void)
@@ -911,6 +942,24 @@ esp_err_t display_service_session_raw_blit(display_service_session_handle_t sess
                                            blit->y_end,
                                            blit->frame_buffer,
                                            blit->wait);
+}
+
+esp_err_t display_service_session_get_touch_snapshot(display_service_session_handle_t session,
+                                                     display_service_touch_snapshot_t *snapshot)
+{
+    ESP_RETURN_ON_FALSE(snapshot != NULL, ESP_ERR_INVALID_ARG, TAG, "touch snapshot output missing");
+    ESP_RETURN_ON_ERROR(display_service_lock(), TAG, "lock failed");
+    if (!display_service_session_valid_unlocked(session)) {
+        display_service_unlock();
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_display.touch == NULL) {
+        display_service_unlock();
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    *snapshot = s_display.touch_snapshot;
+    display_service_unlock();
+    return ESP_OK;
 }
 
 bool display_service_has_exclusive_session(void)

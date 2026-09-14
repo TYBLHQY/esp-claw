@@ -6,7 +6,6 @@ idf_component_register(
     PRIV_REQUIRES
         cap_skill_mgr
         claw_cap
-        claw_launcher
         claw_skill
         fatfs
         unity

@@ -110,7 +110,7 @@ import LinkToSource from '@/components/LinkToSource.astro';
 ## 文件系统
 
 <FileTree>
-- fatfs
+- DATA
   - sessions
     - ... 会话历史
   - memory
@@ -125,6 +125,10 @@ import LinkToSource from '@/components/LinkToSource.astro';
     - skill_id
       - SKILL.md Skill 元数据与正文
       - scripts/ Skill 自带脚本（可选）
+  - apps
+    - app_id
+      - launcher.json App 元数据与 Lua 入口
+      - scripts/ App 脚本
   - scripts
     - ... Lua 脚本
   - router_rules

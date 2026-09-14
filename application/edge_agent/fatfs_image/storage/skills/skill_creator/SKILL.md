@@ -17,6 +17,8 @@ Use this skill when the user wants to add a new reusable feature that the model 
 
 Also use this skill when the user asks to create, register, update, or remove a skill, or asks how to create a skill that includes Lua files.
 
+Do not use this skill for launcher-visible Apps; use `app_creator` instead.
+
 ## Core Rules
 
 Every skill creation flow those mandatory phases:

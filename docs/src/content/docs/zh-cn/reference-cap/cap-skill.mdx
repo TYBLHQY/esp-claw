@@ -57,7 +57,7 @@ import { Aside } from '@astrojs/starlight/components';
 {"ok":true,"skill_id":"weather_alerts"}
 ```
 
-Launcher 不属于该工具的输入。已有 `launcher.json` 会由 Launcher registry 在 Skill registry 变化后重新加载。
+App 与 Skill 使用独立目录和 registry，`publish_skill` 不会创建、更新或重新加载 App。
 
 ## `remove_skill`
 
@@ -67,7 +67,7 @@ Launcher 不属于该工具的输入。已有 `launcher.json` 会由 Launcher re
 {"skill_id":"weather_alerts"}
 ```
 
-该操作只允许 writable root 中的 runtime Skill，System Skill 会被拒绝。实现会直接递归删除整个 Skill 目录，包括 `SKILL.md`、`launcher.json`、scripts、references 和 assets，然后刷新 registry。删除过程不提供事务或回滚；文件系统中途失败时，目录可能只被部分删除。
+该操作只允许 writable root 中的 runtime Skill，System Skill 会被拒绝。实现会直接递归删除整个 Skill 目录，包括 `SKILL.md`、scripts、references 和 assets，然后刷新 registry。App 使用独立目录，不受 Skill 删除影响。删除过程不提供事务或回滚；文件系统中途失败时，目录可能只被部分删除。
 
 成功结果：
 

@@ -46,17 +46,7 @@ lvgl.init(panel_handle, io_handle, width, height, panel_if, {
     task_period_ms = 10,
 })
 
-local touch_registered = false
-
 local ok, err = pcall(function()
-    local touch_handle, touch_err = board_manager.get_lcd_touch_handle("lcd_touch")
-    if touch_handle == nil then
-        print("no touch handle on this board, demo will run without touch:", touch_err)
-    else
-        touch_registered = lvgl.indev_register("touch", touch_handle)
-        print("touch indev registered:", touch_registered)
-    end
-
     local bad_ok, bad_err = pcall(lvgl.demo, "__missing_demo__")
     assert(not bad_ok, "unknown demo should be rejected")
     assert(string.find(tostring(bad_err), "demo unavailable", 1, true),
@@ -81,9 +71,6 @@ local ok, err = pcall(function()
     delay.delay_ms(3000)
 end)
 
-if touch_registered then
-    lvgl.indev_unregister("touch")
-end
 lvgl.deinit()
 
 if ok then

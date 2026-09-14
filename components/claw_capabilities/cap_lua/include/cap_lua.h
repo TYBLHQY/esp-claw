@@ -28,7 +28,6 @@ typedef void (*cap_lua_exit_cleanup_fn_t)(lua_State *L);
 #define CAP_LUA_JOB_EXCLUSIVE_MAX       32
 #define CAP_LUA_JOB_PATH_MAX            192
 #define CAP_LUA_JOB_ID_LEN              9
-#define CAP_LUA_JOB_SKILL_ID_MAX        64
 
 typedef enum {
     CAP_LUA_JOB_QUEUED = 0,
@@ -52,27 +51,15 @@ typedef struct {
     char job_id[CAP_LUA_JOB_ID_LEN];
     char name[CAP_LUA_JOB_NAME_MAX];
     char exclusive[CAP_LUA_JOB_EXCLUSIVE_MAX];
-    char skill_id[CAP_LUA_JOB_SKILL_ID_MAX];
     char path[CAP_LUA_JOB_PATH_MAX];
 } cap_lua_job_event_t;
 
 typedef void (*cap_lua_job_event_cb_t)(const cap_lua_job_event_t *event, void *user_ctx);
 
 typedef struct {
-    const char *path;
-    const char *args_json;
-    const char *name;
-    const char *exclusive;
-    const char *skill_id; /**< Optional executable Skill that owns this run. */
-    uint32_t timeout_ms;
-    bool replace;
-} cap_lua_async_config_t;
-
-typedef struct {
     char job_id[CAP_LUA_JOB_ID_LEN];
     char name[CAP_LUA_JOB_NAME_MAX];
     char exclusive[CAP_LUA_JOB_EXCLUSIVE_MAX];
-    char skill_id[CAP_LUA_JOB_SKILL_ID_MAX];
     char path[CAP_LUA_JOB_PATH_MAX];
     cap_lua_job_status_t status;
 } cap_lua_job_snapshot_t;
@@ -103,9 +90,6 @@ esp_err_t cap_lua_run_script_async(const char *path,
                                    bool replace,
                                    char *output,
                                    size_t output_size);
-esp_err_t cap_lua_run_script_async_ex(const cap_lua_async_config_t *config,
-                                      char *output,
-                                      size_t output_size);
 size_t cap_lua_collect_active_jobs(cap_lua_job_snapshot_t *out, size_t max);
 esp_err_t cap_lua_list_jobs(const char *status, char *output, size_t output_size);
 esp_err_t cap_lua_get_job(const char *id_or_name, char *output, size_t output_size);

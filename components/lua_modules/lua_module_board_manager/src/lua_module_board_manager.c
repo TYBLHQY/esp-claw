@@ -204,32 +204,6 @@ static int lua_bm_get_display_lcd_params(lua_State *L)
 #endif
 }
 
-static int lua_bm_get_lcd_touch_handle(lua_State *L)
-{
-#if defined(CONFIG_ESP_BOARD_DEV_LCD_TOUCH_SUPPORT) && defined(CONFIG_ESP_BOARD_DEV_LCD_TOUCH_SUB_I2C_SUPPORT)
-    const char *name = luaL_checkstring(L, 1);
-    void *handle = NULL;
-    esp_err_t err = esp_board_manager_get_device_handle(name, &handle);
-    if (err != ESP_OK) {
-        return push_err(L, err, name);
-    }
-
-    dev_lcd_touch_handles_t *touch_handles = (dev_lcd_touch_handles_t *)handle;
-    if (touch_handles == NULL || touch_handles->touch_handle == NULL) {
-        lua_pushnil(L);
-        lua_pushfstring(L, "lcd_touch '%s' handle is NULL", name);
-        return 2;
-    }
-
-    lua_pushlightuserdata(L, touch_handles->touch_handle);
-    return 1;
-#else
-    lua_pushnil(L);
-    lua_pushstring(L, "lcd touch support is disabled");
-    return 2;
-#endif
-}
-
 #ifdef CONFIG_ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT
 static esp_err_t lua_bm_get_i2s_audio_format(const periph_i2s_config_t *i2s_cfg,
                                              uint32_t *sample_rate,
@@ -421,7 +395,6 @@ int luaopen_board_manager(lua_State *L)
         {"get_device_handle", lua_bm_get_device_handle},
         {"get_device_config_handle", lua_bm_get_device_config_handle},
         {"get_display_lcd_params", lua_bm_get_display_lcd_params},
-        {"get_lcd_touch_handle", lua_bm_get_lcd_touch_handle},
         {"get_audio_codec_input_params", lua_bm_get_audio_codec_input_params},
         {"get_audio_codec_output_params", lua_bm_get_audio_codec_output_params},
         {"get_camera_paths",  lua_bm_get_camera_paths},

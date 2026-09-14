@@ -31,15 +31,13 @@ After `display.init(...)` succeeds:
 - Most drawing APIs can be used
 - The Lua script owns the display session until `display.deinit()`.
 
-Touch input for the same session can be read through `lcd_touch` with the touch handle from `board_manager`:
+Touch input for the active display session is available through `display.touch`:
 
 ```lua
-local board_manager = require("board_manager")
-local lcd_touch = require("lcd_touch")
-
-local touch_handle = board_manager.get_lcd_touch_handle("lcd_touch")
-lcd_touch.sync(touch_handle)
-local touch = lcd_touch.poll(touch_handle)
+local points = display.touch.read()
+for _, point in ipairs(points) do
+    print(point.id, point.x, point.y)
+end
 ```
 
 When finished:
@@ -91,6 +89,17 @@ Deinitializes the drawing context.
 
 - Returns `true` on success
 - Raises a Lua error on failure
+
+## Touch input
+
+### `display.touch.read()`
+
+Returns all currently active touch points as an array. Each point contains `id`, `x`, and `y`.
+
+- Returns `{}` when the panel is not being touched.
+- Point order is not stable; use `id` to track a point between reads.
+- Requires a successful `display.init(...)` call.
+- Raises a Lua error when the board has no LCD touch device or the display session is unavailable.
 
 ### `display.width`
 

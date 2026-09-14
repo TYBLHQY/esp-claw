@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "lcd_touch_paint",
+  "entry": "scripts/lcd_touch_paint.lua",
+  "display_name": "Screen Paint",
+  "icon": "assets/icon.jpg",
+  "args": {},
+  "order": 12,
+  "visible": true
+}

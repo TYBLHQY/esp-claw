@@ -121,7 +121,6 @@ static esp_err_t lua_lvgl_quiesce_runtime(void)
     }
     if (s_lvgl.runtime_initialized) {
         s_lvgl.runtime_initialized = false;
-        lua_lvgl_indev_release_locked();
         /* The Lua LVGL session shares the global LVGL runtime with system UI. Do not call lv_anim_delete_all() here; object-bound animations are cleaned up when their objects are deleted. */
     }
     lua_lvgl_unlock();
@@ -173,7 +172,6 @@ static void lua_lvgl_release_runtime_locked(void)
      * state while we are still on the script task. */
     lua_State *owner = s_lvgl.runtime_owner;
 
-    lua_lvgl_indev_release_locked();
     lua_lvgl_delete_owned_objects_locked();
     lua_lvgl_invalidate_records_locked();
     lua_lvgl_release_fonts_locked();

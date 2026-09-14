@@ -4,6 +4,7 @@ idf_component_register(
         "src/display_dirty.c"
         "src/display_hal.c"
         "src/display_text.c"
+        "src/lua_display_touch.c"
         "src/lua_module_display.c"
     INCLUDE_DIRS
         "src"

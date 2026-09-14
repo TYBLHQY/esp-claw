@@ -11,7 +11,6 @@
 
 #include "cap_skill_mgr.h"
 #include "claw_cap.h"
-#include "claw_launcher.h"
 #include "claw_skill.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -70,10 +69,6 @@ static void create_skill_fixture(void)
     write_text(TEST_RUNTIME_ROOT "/" TEST_SKILL_ID "/scripts/main.lua", "return true\n");
     write_text(TEST_RUNTIME_ROOT "/" TEST_SKILL_ID "/references/readme.md", "reference\n");
     write_text(TEST_RUNTIME_ROOT "/" TEST_SKILL_ID "/assets/icon.jpg", "jpeg\n");
-    write_text(TEST_RUNTIME_ROOT "/" TEST_SKILL_ID "/launcher.json",
-               "{\"schema_version\":1,\"entry\":\"scripts/main.lua\",\"display_name\":\"Runtime Test\","
-               "\"icon\":\"assets/icon.jpg\",\"args\":{\"mode\":\"basic\"},\"order\":7,\"visible\":true,"
-               "\"future_option\":{\"enabled\":true}}");
 }
 
 static void create_readonly_fixture(void)
@@ -105,34 +100,6 @@ static esp_err_t collect_skill(const claw_skill_catalog_entry_t *entry, void *us
     result->found_valid |= strcmp(entry->id, TEST_SKILL_ID) == 0;
     result->found_invalid |= strcmp(entry->id, TEST_INVALID_ID) == 0;
     return ESP_OK;
-}
-
-typedef struct {
-    size_t count;
-    bool found;
-    bool fields_valid;
-} launcher_result_t;
-
-static esp_err_t collect_launcher(const claw_launcher_entry_t *entry, void *user_ctx)
-{
-    launcher_result_t *result = user_ctx;
-    result->count++;
-    if (strcmp(entry->skill_id, TEST_SKILL_ID) == 0) {
-        result->found = true;
-        result->fields_valid = strcmp(entry->display_name, "Runtime Test") == 0 &&
-                               strstr(entry->entry, "/runtime_test/scripts/main.lua") != NULL &&
-                               entry->icon && strstr(entry->icon, "/runtime_test/assets/icon.jpg") != NULL &&
-                               entry->args_json && strcmp(entry->args_json, "{\"mode\":\"basic\"}") == 0 &&
-                               entry->order == 7 && entry->visible;
-    }
-    return ESP_OK;
-}
-
-static launcher_result_t read_launchers(void)
-{
-    launcher_result_t result = {0};
-    TEST_ASSERT_EQUAL(ESP_OK, claw_launcher_foreach_entry(collect_launcher, &result));
-    return result;
 }
 
 TEST_CASE("skill manager exposes only the compact tool surface", "[skill][cap]")
@@ -182,9 +149,6 @@ TEST_CASE("skill tools publish activate and remove complete runtime directory", 
     TEST_ASSERT_EQUAL(ESP_OK,
                       claw_cap_call("publish_skill", "{\"skill_id\":\"runtime_test\"}", &system_ctx, s_output, sizeof(s_output)));
     TEST_ASSERT_EQUAL_STRING("{\"ok\":true,\"skill_id\":\"runtime_test\"}", s_output);
-    launcher_result_t launchers = read_launchers();
-    TEST_ASSERT_TRUE(launchers.found);
-    TEST_ASSERT_TRUE(launchers.fields_valid);
 
     TEST_ASSERT_EQUAL(ESP_OK,
                       claw_cap_call("activate_skill", "{\"skill_id\":\"runtime_test\"}", &agent_ctx, s_output, sizeof(s_output)));
@@ -201,9 +165,6 @@ TEST_CASE("skill tools publish activate and remove complete runtime directory", 
     TEST_ASSERT_EQUAL_STRING("{\"ok\":true,\"skill_id\":\"runtime_test\"}", s_output);
     /* The complete payload tree must be gone after removal. */
     TEST_ASSERT_FALSE(path_exists(TEST_RUNTIME_ROOT "/" TEST_SKILL_ID));
-    launchers = read_launchers();
-    TEST_ASSERT_FALSE(launchers.found);
-    TEST_ASSERT_EQUAL(0, launchers.count);
 }
 
 TEST_CASE("skill registry skips invalid skill metadata", "[skill][registry]")
@@ -242,8 +203,6 @@ static void init_test_runtime(void)
     ESP_ERROR_CHECK(claw_skill_add_directory(TEST_RUNTIME_ROOT));
     ESP_ERROR_CHECK(claw_skill_add_directory(TEST_READONLY_ROOT));
     ESP_ERROR_CHECK(claw_skill_reload_registry());
-    ESP_ERROR_CHECK(claw_launcher_init());
-    ESP_ERROR_CHECK(claw_launcher_reload());
     ESP_ERROR_CHECK(claw_cap_init());
     ESP_ERROR_CHECK(cap_skill_mgr_register_group());
     ESP_ERROR_CHECK(claw_cap_start_all());

@@ -8,7 +8,6 @@ idf_component_register(
         "src/lua_lvgl_eaf.c"
         "src/lua_lvgl_font.c"
         "src/lua_lvgl_extra_widgets.c"
-        "src/lua_lvgl_indev.c"
         "src/lua_lvgl_layout.c"
         "src/lua_lvgl_methods.c"
         "src/lua_lvgl_object.c"
@@ -23,7 +22,6 @@ idf_component_register(
         claw_core
         display_service
         esp_lcd
-        esp_lcd_touch
         esp_timer
         lvgl
 )
