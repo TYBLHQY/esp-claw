@@ -4,6 +4,8 @@ This directory contains the Emscripten build for the ESP-Claw Lua LVGL
 simulator. It intentionally keeps only simulator-specific source files in the
 repository.
 
+The simulator supports the Lua LVGL binding but does not provide `require("display")`. Test apps using the screen API on an ESP device.
+
 Third-party dependencies are fetched into the CMake build directory:
 
 - LVGL `v9.5.0`

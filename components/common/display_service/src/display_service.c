@@ -15,6 +15,7 @@
 #include "devices/dev_lcd_touch/dev_lcd_touch.h"
 #include "esp_board_manager_includes.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
@@ -37,6 +38,7 @@ static const char *TAG = "display_service";
 #define DISPLAY_SERVICE_TOUCH_OBSERVER_GENERATION_MASK 0x00ffffffu
 #define DISPLAY_SERVICE_EXIT_GESTURE_START_HEIGHT 80
 #define DISPLAY_SERVICE_EXIT_GESTURE_MIN_DY 72
+#define DISPLAY_SERVICE_RAW_SWAP_STRIP_ROWS 16
 
 typedef void (*display_service_scene_cleanup_cb_t)(void *owner_ctx, void *user_ctx);
 
@@ -88,6 +90,10 @@ typedef struct {
     esp_lcd_panel_handle_t panel;
     esp_lcd_panel_io_handle_t io;
     esp_lcd_touch_handle_t touch;
+    display_service_info_t info;
+    bool raw_rgb565_swap;
+    uint8_t *raw_swap_strip;
+    size_t raw_swap_strip_bytes;
     lv_display_t *display;
     lv_indev_t *touch_indev;
     lv_obj_t *default_screen;
@@ -227,8 +233,12 @@ static void display_service_clear_scene_locked(void)
 
 static bool display_service_session_slot_contains(const struct display_service_session_t *session)
 {
-    return session >= &s_display.sessions[0] &&
-           session < &s_display.sessions[DISPLAY_SERVICE_MAX_SESSIONS];
+    for (size_t i = 0; i < DISPLAY_SERVICE_MAX_SESSIONS; i++) {
+        if (session == &s_display.sessions[i]) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool display_service_session_valid_unlocked(display_service_session_handle_t session)
@@ -495,7 +505,6 @@ static bool display_service_publish_touch_snapshot(const esp_lcd_touch_point_dat
 {
     display_service_touch_snapshot_t snapshot = {
         .count = count,
-        .generation = s_display.touch_snapshot.generation + 1,
     };
 
     for (uint8_t i = 0; i < count; i++) {
@@ -583,6 +592,27 @@ static esp_err_t display_service_load_board_display(dev_display_lcd_config_t **o
     }
     s_display.panel = lcd_handles->panel_handle;
     s_display.io = lcd_handles->io_handle;
+    s_display.info.width = lcd_cfg->lcd_width;
+    s_display.info.height = lcd_cfg->lcd_height;
+    s_display.info.bits_per_pixel = lcd_cfg->bits_per_pixel;
+    if (strcmp(lcd_cfg->sub_type, ESP_BOARD_DEVICE_LCD_SUB_TYPE_DSI) == 0) {
+        s_display.info.panel_interface = DISPLAY_SERVICE_PANEL_INTERFACE_DSI;
+    } else if (strcmp(lcd_cfg->sub_type, ESP_BOARD_DEVICE_LCD_SUB_TYPE_RGB) == 0 ||
+               strcmp(lcd_cfg->sub_type, ESP_BOARD_DEVICE_LCD_SUB_TYPE_RGB_3WIRE_SPI) == 0) {
+        s_display.info.panel_interface = DISPLAY_SERVICE_PANEL_INTERFACE_RGB;
+    } else if (strcmp(lcd_cfg->sub_type, ESP_BOARD_DEVICE_LCD_SUB_TYPE_I80) == 0) {
+        s_display.info.panel_interface = DISPLAY_SERVICE_PANEL_INTERFACE_I80;
+    } else if (strcmp(lcd_cfg->sub_type, ESP_BOARD_DEVICE_LCD_SUB_TYPE_PARLIO) == 0) {
+        s_display.info.panel_interface = DISPLAY_SERVICE_PANEL_INTERFACE_PARLIO;
+    } else {
+        s_display.info.panel_interface = DISPLAY_SERVICE_PANEL_INTERFACE_SPI;
+    }
+    /* RAW RGB565 pixels are little-endian; only big-endian panel IO needs a byte swap. */
+    s_display.raw_rgb565_swap = lcd_cfg->bits_per_pixel == 16 &&
+        (s_display.info.panel_interface == DISPLAY_SERVICE_PANEL_INTERFACE_SPI ||
+         s_display.info.panel_interface == DISPLAY_SERVICE_PANEL_INTERFACE_I80 ||
+         s_display.info.panel_interface == DISPLAY_SERVICE_PANEL_INTERFACE_PARLIO) &&
+        lcd_cfg->data_endian == LCD_RGB_DATA_ENDIAN_BIG;
     (void)esp_lcd_panel_disp_on_off(s_display.panel, true);
     return ESP_OK;
 #endif
@@ -650,6 +680,7 @@ esp_err_t display_service_start(const display_service_config_t *config)
 
     ESP_GOTO_ON_ERROR(display_service_load_board_display(&lcd_cfg, &lcd_handles), fail, TAG, "load display failed");
     display_service_load_board_touch();
+    s_display.info.touch_available = s_display.touch != NULL;
     ESP_GOTO_ON_FALSE(buffer_lines > 0 && buffer_lines <= lcd_cfg->lcd_height,
                       ESP_ERR_INVALID_ARG, fail, TAG, "invalid buffer lines");
 
@@ -691,7 +722,7 @@ esp_err_t display_service_start(const display_service_config_t *config)
     s_display.adapter_started = true;
     s_display.started = true;
 
-    ESP_LOGI(TAG, "started display service: %ux%u", lcd_cfg->lcd_width, lcd_cfg->lcd_height);
+    ESP_LOGI(TAG, "started display service: %ux%u raw_rgb565_swap=%d", lcd_cfg->lcd_width, lcd_cfg->lcd_height, (int)s_display.raw_rgb565_swap);
     return ESP_OK;
 
 fail:
@@ -729,6 +760,10 @@ void display_service_stop(void)
         s_display.adapter_initialized = false;
         s_display.adapter_started = false;
     }
+    heap_caps_free(s_display.raw_swap_strip);
+    s_display.raw_swap_strip = NULL;
+    s_display.raw_swap_strip_bytes = 0;
+    s_display.raw_rgb565_swap = false;
     if (s_display.dummy_mutex) {
         vSemaphoreDelete(s_display.dummy_mutex);
         s_display.dummy_mutex = NULL;
@@ -736,6 +771,7 @@ void display_service_stop(void)
     s_display.panel = NULL;
     s_display.io = NULL;
     s_display.touch = NULL;
+    memset(&s_display.info, 0, sizeof(s_display.info));
     memset(&s_display.touch_snapshot, 0, sizeof(s_display.touch_snapshot));
     s_display.dummy_owner = NULL;
     memset(s_display.touch_observers, 0, sizeof(s_display.touch_observers));
@@ -925,6 +961,19 @@ esp_err_t display_service_session_load_screen(display_service_session_handle_t s
 lv_display_t *display_service_session_display(display_service_session_handle_t session)
 {
     return display_service_session_is_valid(session) ? s_display.display : NULL;
+}
+
+esp_err_t display_service_session_get_info(display_service_session_handle_t session, display_service_info_t *info)
+{
+    ESP_RETURN_ON_FALSE(info != NULL, ESP_ERR_INVALID_ARG, TAG, "display info output missing");
+    ESP_RETURN_ON_ERROR(display_service_lock(), TAG, "lock failed");
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    if (display_service_session_valid_unlocked(session)) {
+        *info = s_display.info;
+        err = ESP_OK;
+    }
+    display_service_unlock();
+    return err;
 }
 
 esp_err_t display_service_session_raw_blit(display_service_session_handle_t session,
@@ -1241,6 +1290,14 @@ static esp_err_t display_service_exit_dummy_draw(const char *owner)
         display_service_dummy_unlock();
         return ret;
     }
+    /* Restore visibility before releasing RAW ownership, including overlay suspension. */
+    ret = s_display.panel ? esp_lcd_panel_disp_on_off(s_display.panel, true) : ESP_ERR_INVALID_STATE;
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "restore panel visibility failed: %s", esp_err_to_name(ret));
+        display_service_unlock();
+        display_service_dummy_unlock();
+        return ret;
+    }
     display_service_delete_dummy_input_blocker_locked();
     if (s_display.display != NULL && !s_display.dummy_draw_suspended) {
         ret = esp_lv_adapter_set_dummy_draw(s_display.display, false);
@@ -1264,6 +1321,40 @@ static esp_err_t display_service_exit_dummy_draw(const char *owner)
     return ret;
 }
 
+static esp_err_t display_service_dummy_draw_blit_swapped_locked(int x_start, int y_start, int x_end, int y_end, const void *frame_buffer, bool wait)
+{
+    ESP_RETURN_ON_FALSE(wait, ESP_ERR_NOT_SUPPORTED, TAG, "swapped RAW blit requires wait=true");
+    ESP_RETURN_ON_FALSE(x_start >= 0 && y_start >= 0 && x_end > x_start && y_end > y_start &&
+                        x_end <= s_display.info.width && y_end <= s_display.info.height,
+                        ESP_ERR_INVALID_ARG, TAG, "swapped RAW blit area invalid");
+    const int width = x_end - x_start, height = y_end - y_start;
+    const size_t row_bytes = (size_t)width * 2;
+    const size_t needed = row_bytes * DISPLAY_SERVICE_RAW_SWAP_STRIP_ROWS;
+    if (s_display.raw_swap_strip_bytes < needed) {
+        uint8_t *strip = heap_caps_aligned_alloc(16, needed, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        ESP_RETURN_ON_FALSE(strip != NULL, ESP_ERR_NO_MEM, TAG, "RAW swap strip allocation failed: %u bytes", (unsigned)needed);
+        heap_caps_free(s_display.raw_swap_strip);
+        s_display.raw_swap_strip = strip;
+        s_display.raw_swap_strip_bytes = needed;
+    }
+    const uint8_t *source = frame_buffer;
+    for (int row = 0; row < height; row += DISPLAY_SERVICE_RAW_SWAP_STRIP_ROWS) {
+        const int rows = height - row < DISPLAY_SERVICE_RAW_SWAP_STRIP_ROWS ? height - row : DISPLAY_SERVICE_RAW_SWAP_STRIP_ROWS;
+        for (int i = 0; i < rows; ++i) {
+            const uint8_t *src = source + (size_t)(row + i) * row_bytes;
+            uint8_t *dst = s_display.raw_swap_strip + (size_t)i * row_bytes;
+            for (int pixel = 0; pixel < width; ++pixel) {
+                dst[2 * pixel] = src[2 * pixel + 1];
+                dst[2 * pixel + 1] = src[2 * pixel];
+            }
+        }
+        esp_err_t err = esp_lv_adapter_dummy_draw_blit(s_display.display, x_start, y_start + row, x_end, y_start + row + rows,
+                                                        s_display.raw_swap_strip, true);
+        if (err != ESP_OK) return err;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t display_service_dummy_draw_blit(const char *owner,
                                                  int x_start,
                                                  int y_start,
@@ -1277,16 +1368,20 @@ static esp_err_t display_service_dummy_draw_blit(const char *owner,
     ESP_RETURN_ON_FALSE(owner != NULL, ESP_ERR_INVALID_ARG, TAG, "dummy owner missing");
     ESP_RETURN_ON_FALSE(frame_buffer != NULL, ESP_ERR_INVALID_ARG, TAG, "frame buffer missing");
     ESP_RETURN_ON_ERROR(display_service_dummy_lock(), TAG, "dummy lock failed");
+    ret = display_service_lock();
+    if (ret != ESP_OK) {
+        display_service_dummy_unlock();
+        return ret;
+    }
     if (!s_display.dummy_draw_enabled || !display_service_dummy_owner_matches(owner) ||
-            s_display.display == NULL) {
-        display_service_dummy_unlock();
-        return ESP_ERR_INVALID_STATE;
+            s_display.display == NULL || s_display.dummy_draw_suspended) {
+        ret = ESP_ERR_INVALID_STATE;
+    } else {
+        ret = s_display.raw_rgb565_swap ?
+              display_service_dummy_draw_blit_swapped_locked(x_start, y_start, x_end, y_end, frame_buffer, wait) :
+              esp_lv_adapter_dummy_draw_blit(s_display.display, x_start, y_start, x_end, y_end, frame_buffer, wait);
     }
-    if (s_display.dummy_draw_suspended) {
-        display_service_dummy_unlock();
-        return ESP_OK;
-    }
-    ret = esp_lv_adapter_dummy_draw_blit(s_display.display, x_start, y_start, x_end, y_end, frame_buffer, wait);
+    display_service_unlock();
     display_service_dummy_unlock();
     return ret;
 }

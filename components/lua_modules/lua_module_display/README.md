@@ -1,446 +1,151 @@
-# Lua Display
+# `display` Lua API
 
-This module describes how to correctly use `display` when writing Lua scripts.
+`display` is an immediate-mode 2D drawing API for the device's built-in screen. Use it to render games, dashboards, camera overlays, and custom interfaces. It does not provide widgets or an external-screen API. One Lua job owns the screen at a time, and the returned screen must only be used by the Lua job that opened it.
 
-`display` is a low-level drawing module. It can:
-- Initialize and deinitialize the LCD drawing context
-- Draw text, lines, rectangles, circles, arcs, ellipses, triangles, and round rectangles
-- Draw raw RGB565 or RGB888 pixel buffers
-- Draw RGB565 or RGB888 buffers obtained from `image.frame` values through the `image` module
-- Manage frame-based rendering and partial screen flushes
+Signatures below use `->` to show return values. Functions without `->` return no values.
 
-## Typical setup
-
-In this project, `display` is usually used together with `board_manager`:
+## Quick start
 
 ```lua
-local board_manager = require("board_manager")
 local display = require("display")
+local screen <close> = display.open()
+local info = screen:info()
+local panel_color = display.color(20, 90, 130)
 
-local panel_handle, io_handle, width, height, panel_if, pixel_format =
-    board_manager.get_display_lcd_params("display_lcd")
-
-display.init(panel_handle, io_handle, width, height, panel_if, pixel_format, {
-    framebuffer_count = 1,
-})
+screen:begin({ clear = "#101820" })
+screen:fill_round_rect(12, 12, info.width - 24, 60, 8, panel_color)
+screen:text(24, 30, "hello", { font_size = 24, color = 0xFFFFFFFF })
+screen:present()
 ```
 
-After `display.init(...)` succeeds:
-- `display.width` returns the current screen width
-- `display.height` returns the current screen height
-- Most drawing APIs can be used
-- The Lua script owns the display session until `display.deinit()`.
+The drawing sequence is always `begin()` → draw → `present()`. The screen is released by `screen:close()`, Lua's `<close>` scope, or job exit. During a running job, dropping the Lua variable alone does not release it. Keep the screen open while its scene should remain visible.
 
-Touch input for the active display session is available through `display.touch`:
+## Open and screen information
+
+`display.open([options]) -> screen` opens the built-in screen. Calling it again before the current screen closes raises `display already open`.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `pixel_format` | `"rgb565"` | `"rgb565"` or `"rgb888"`; must match the screen's color depth |
+| `rgb565_swap` | `false` | Swap each RGB565 pixel's two bytes before output; invalid with `"rgb888"` |
+| `framebuffer_count` | `1` | `1` or `2`; use `2` only when the extra memory is justified by the scene |
+
+Normally omit `pixel_format` and `rgb565_swap`. The built-in screen configuration determines whether RGB565 output needs byte-order conversion. `rgb565_swap = true` applies one additional byte swap to every RGB565 pixel and is intended only for compatibility with a board configuration that explicitly requires it.
+
+`screen:info()` returns:
+
+| Field | Meaning |
+| --- | --- |
+| `width`, `height` | Screen dimensions in pixels |
+| `pixel_format` | Active drawing format: `"rgb565"` or `"rgb888"` |
+| `bytes_per_pixel` | `2` for RGB565 or `3` for RGB888 |
+| `framebuffer_count` | Active framebuffer count |
+| `framebuffer_bytes` | Total bytes reserved by all framebuffers |
+| `rgb565_swap` | Whether the optional additional RGB565 swap was requested |
+| `touch_available` | Whether the built-in screen has touch input |
+
+Cache this table if it is needed every frame.
+
+`screen:stats()` returns `present_us` (last presentation time in microseconds), `dirty_pixels` (number of pixels submitted), and `framebuffer_bytes` (total framebuffer memory). A frame with no update reports zero presentation time and zero submitted pixels.
+
+`screen:close()` is safe to call more than once. Other screen methods raise an error after close.
+
+## Frames and drawing state
 
 ```lua
-local points = display.touch.read()
-for _, point in ipairs(points) do
-    print(point.id, point.x, point.y)
-end
+screen:begin({ clear = 0xFF0C1520 })
+screen:save()
+screen:translate(20, 40)
+screen:clip(0, 0, 120, 80)
+screen:fill_rect(0, 0, 120, 80, 0xCC183047)
+screen:restore()
+local updated = screen:present()
 ```
 
-When finished:
+- `screen:begin([{ clear = color }])` starts a frame. Omit `clear` to preserve the previous image; the first drawn frame starts from black. Starting another frame before presenting the current one is an error.
+- `screen:present([{ full = false }]) -> boolean` finishes the frame and returns `true` if pixels were submitted. A frame with no changes normally returns `false`; `full = true` requests a full-screen refresh. If presentation fails, the frame remains active so it can be retried or the screen can be closed.
+- `screen:save()` / `screen:restore()` save and restore translation and clipping. The stack holds at most eight saved states; restoring without a matching save is an error.
+- `screen:translate(dx, dy)` adds an integer offset to subsequent drawing coordinates. `screen:clip(x, y, w, h)` intersects the current clip with a rectangle in the translated coordinate space. A negative clip width or height is an error; zero creates an empty clip. Drawing state resets at each `begin()`.
+
+Drawing, translation, clipping, save, and restore require an active frame. `info()`, `stats()`, `measure_text()`, and `touch()` do not.
+
+## Colors and shapes
+
+Every shape method accepts a `color` in one of these forms:
+
+- A packed `0xAARRGGBB` integer. On devices with 32-bit Lua integers, values with the high bit set may appear negative but retain the same color bits.
+- `"#rrggbb"` or `"#rrggbbaa"`.
+- `{ r = 255, g = 80, b = 40, a = 192 }` or `{ 255, 80, 40, 192 }`; omitted alpha defaults to 255.
+
+`display.color(r, g, b[, a]) -> integer` packs components in `0..255` into a reusable color; `a` defaults to 255. Alpha 0 draws nothing, alpha 255 is opaque, and intermediate alpha values blend over the current image. A packed literal must include its alpha byte: use `0xFFFF0000` for opaque red, not `0xFF0000`. Six-digit color strings such as `"#ff0000"` are opaque.
+
+Positions, dimensions, and radii are integers. The origin is at the top left, x grows rightward, and y grows downward. Drawing is clipped to the screen and current clip.
 
 ```lua
-pcall(display.end_frame)
-pcall(display.deinit)
+screen:fill_rect(x, y, w, h, color)
+screen:stroke_rect(x, y, w, h, color)
+screen:line(x0, y0, x1, y1, color)
+screen:fill_circle(cx, cy, radius, color)
+screen:stroke_circle(cx, cy, radius, color)
+screen:arc(cx, cy, radius, start_deg, end_deg, color)
+screen:fill_round_rect(x, y, w, h, radius, color)
+screen:stroke_round_rect(x, y, w, h, radius, color)
+screen:fill_triangle(x1, y1, x2, y2, x3, y3, color)
 ```
 
-## Important rules
+Arc angles are finite numbers and increase clockwise in screen coordinates.
+Outlines are one pixel wide. Non-positive rectangle dimensions and negative radii draw nothing. For arcs, a sweep of at least 360 degrees draws a full circle, equal start and end angles draw nothing, and a negative difference wraps clockwise through 360 degrees.
 
-- All coordinates and sizes are integer arguments unless noted otherwise.
-- Most numeric drawing arguments are validated as integers in the Lua binding.
-- Passing floating-point values such as `10.5`, `32.2`, or `tilt / 2` to coordinates, widths, heights, radii, crop rectangles, or `font_size` can raise a Lua error instead of being rounded automatically.
-- If a computed value is meant to be a pixel coordinate or size, convert it to an integer first before passing it to the display API. Prefer integer division `//` when the value comes from a division expression.
-- Colors are passed as one value: a hex string, a named color string, or a `{ r, g, b [, a] }` table.
-- Supported hex forms are `#rgb`, `#rgba`, `#rrggbb`, and `#rrggbbaa`.
-- Supported named colors include `black`, `white`, `red`, `green`, `blue`, `yellow`, `cyan`, `magenta`, and `transparent`.
-- Text drawing only supports ASCII text.
-- For Chinese or other Unicode text, render or load an image through the `image` module, convert it to the active display pixel format, then draw the buffer.
-- Image file loading, saving, decoding, and format conversion belong to the `image` module. `display` only draws raw RGB565/RGB888 buffers.
-- This is critical: screen display duration must be considered. Do not deinitialize or exit immediately after `present()`, or the image may only flash briefly. Keep the display session alive long enough, and handle that hold time asynchronously when appropriate.
-
-## Screen lifecycle
-
-### `display.init(panel_handle, io_handle, lcd_width, lcd_height[, panel_if[, pixel_format[, options]]])`
-
-Initializes the drawing context.
-
-- `panel_handle`: lightuserdata, usually from `board_manager.get_display_lcd_params(...)`
-- `io_handle`: lightuserdata or `nil`
-- `lcd_width`: integer
-- `lcd_height`: integer
-- `panel_if`: optional interface constant, usually returned by `board_manager.get_display_lcd_params(...)`
-- Common values come from `board_manager.PANEL_IF_IO`, `board_manager.PANEL_IF_RGB`, and `board_manager.PANEL_IF_MIPI_DSI`
-- `pixel_format`: optional framebuffer format; defaults to RGB565
-- Accepts either `display.PIXEL_FORMAT_RGB565` / `display.PIXEL_FORMAT_RGB888`, or the string `"rgb565"` / `"rgb888"`
-- `options`: optional configuration table
-- `options.framebuffer_count`: `1` or `2`; defaults to `1`. Use `2` only when frame swapping is required.
-- Must match the byte layout configured for the LCD panel.
-- Byte-swap is applied only when the framebuffer is RGB565 (independent of interface); RGB888 buffers are never byte-swapped
-- RGB565 is stored as standard RGB565; RGB888 is stored and submitted as native BGR888. Lua color values keep RGB semantics at parse time.
-- Returns `true` on success
-- Raises a Lua error on failure
-
-### `display.deinit()`
-
-Deinitializes the drawing context.
-
-- Returns `true` on success
-- Raises a Lua error on failure
-
-## Touch input
-
-### `display.touch.read()`
-
-Returns all currently active touch points as an array. Each point contains `id`, `x`, and `y`.
-
-- Returns `{}` when the panel is not being touched.
-- Point order is not stable; use `id` to track a point between reads.
-- Requires a successful `display.init(...)` call.
-- Raises a Lua error when the board has no LCD touch device or the display session is unavailable.
-
-### `display.width`
-
-Returns the current screen width.
-
-### `display.height`
-
-Returns the current screen height.
-
-### `display.pixel_format`
-
-Returns the active framebuffer format as `"rgb565"` or `"rgb888"`.
-
-### `display.bytes_per_pixel`
-
-Returns the number of bytes per pixel that raw pixel APIs expect (`2` for RGB565, `3` for RGB888).
-
-## Frame rendering
-
-The module supports frame-based rendering. This is the preferred mode when a script draws a full screen or updates multiple primitives together.
-
-### `display.begin_frame([options])`
-
-Starts a frame.
-
-`options` is an optional table:
-- `clear`: boolean, default `true`
-- `color`: background color, default `"black"`
-- `preserve`: boolean, default `true`. With two framebuffers and `clear = false`, copies the latest visible frame before drawing. It has no copy cost with the default single framebuffer.
-
-Example:
+## Text and fonts
 
 ```lua
-display.begin_frame({ clear = true, color = "#0c1220" })
+local w, h = screen:measure_text("status", { font_size = 24 })
+screen:text(8, 8, "status", { font_size = 24, color = "#ffffff" })
+
+local font <close> = display.load_font(font_path)
+screen:text(8, 40, "Temperature", { font = font, color = "#ffffff" })
 ```
 
-### `display.present()`
+`screen:text(x, y, text[, options])` draws a valid UTF-8 string inside an active frame. `screen:measure_text(text[, options]) -> width, height` uses the same sizing rules and can be called outside a frame. Both accept `color` (default white), `font_size` (default 24), and `font`.
 
-Flushes the current dirty rectangle to the panel. If no drawing operation changed the framebuffer since the last present, this returns without refreshing.
+Without `font`, the built-in font supports printable ASCII at integer sizes 8–64. Text is not automatically wrapped or aligned: `\n` starts a new line, `\r` returns to the start of the current line, and `\t` advances by four glyph widths. An empty string measures `0, 0`.
 
-### `display.present_full()`
+For other Unicode characters, load a readable pre-generated DFN1 bitmap font with `display.load_font(path) -> font`. A custom font is rendered at its stored size, so `font_size` is ignored when `font` is present. A missing glyph uses the font's `?` glyph if available; otherwise drawing and measurement raise an error. Invalid UTF-8 also raises an error. `font:close()` is idempotent; a closed font cannot be used. Close the font only after its final synchronous `text()` or `measure_text()` call.
 
-Flushes the full current frame to the panel and clears the dirty state.
-
-### `display.end_frame()`
-
-Ends the current frame.
-
-### `display.frame_active()`
-
-Returns a boolean indicating whether a frame is currently active.
-
-### `display.animation_info()`
-
-Returns a table with runtime rendering information:
-- `framebuffer_count`
-- `double_buffered`
-- `frame_active`
-- `flush_in_flight`
-
-## Backlight
-
-### `display.backlight(on)`
-
-Turns the display backlight on or off.
-
-- `on`: boolean
-
-Example:
+## Images and raw pixels
 
 ```lua
-display.backlight(true)
+local image = require("image")
+local frame <close> = image.load_file(image_path)
+local red_tile = string.rep("\0\248", 64 * 64)
+screen:begin()
+screen:image(0, 0, frame, { mode = "contain", width = 120, height = 90, opacity = 220 })
+screen:blit(130, 0, red_tile, { width = 64, height = 64, format = "rgb565" })
+screen:present()
 ```
 
-## Text APIs
+`screen:image(x, y, image_frame[, options])` accepts an `image.frame` from the `image` module. The frame must remain valid during the call. The image is drawn synchronously; it is not retained by `display`.
 
-### `display.draw_text(x, y, text [, options])`
+| `mode` | Result |
+| --- | --- |
+| `"raw"` (default) | Draw the selected source region at its natural size; ignore target `width` and `height` |
+| `"contain"` | Fit inside the target box without distortion, centered |
+| `"cover"` | Fill the target box without distortion, cropping from the center |
+| `"stretch"` | Fill the target box, allowing distortion |
+| `"crop"` | Draw from the source region's top left without scaling, limited by the target size |
 
-Draws ASCII text at the given position.
+Image options also include `source = { x = 0, y = 0, width = 32, height = 24 }` to select a source region, and `opacity` in `0..255` (default 255). Source coordinates must be inside the image and the selected region must fit. Omitted source dimensions extend to the source image's edge. For non-`raw` modes, omitted or zero target dimensions default to the selected source dimensions. Opacity 0 draws nothing.
 
-`options` is an optional table:
-- `color`: text color, default `"white"`
-- `font_size`: integer, default `24`; floating-point values are rejected
-- `bg`: optional background color
-- Text color and background can include alpha when drawing inside an active frame.
+The target box is not cleared automatically. For example, `contain` leaves any uncovered part of the box unchanged.
 
-Example:
+`screen:blit(x, y, bytes, options)` draws a Lua string of raw pixels. `options` must specify positive integer `width` and `height`, plus `format`: `"rgb565"` (little-endian pixels), `"rgb888"` (RGB byte order), or `"bgr888"` (BGR byte order). The string length must equal `width * height * bytes_per_pixel` exactly. `blit()` does not scale or apply opacity; use `image()` for those operations. Raw pointers are not accepted.
 
-```lua
-display.draw_text(16, 24, "hello", {
-    color = "white",
-    font_size = 24,
-})
-```
+Both `image()` and `blit()` obey the current translation and clip. Their coordinates identify the destination's top-left corner.
 
-Restrictions:
-- `text` must be ASCII
-- Non-ASCII text raises an error
-- Semi-transparent text or background requires `begin_frame(...)` before drawing.
+## Touch and errors
 
-### `display.measure_text(text [, options])`
+`screen:touch() -> { points = { { id = number, x = number, y = number }, ... } }` returns the latest touch reading in screen coordinates. `points` is ordered by the touch provider and is empty when nothing is touching the screen. On a board without built-in touch, the call raises a not-supported error; check `screen:info().touch_available` first.
 
-Measures text without drawing it.
+Invalid arguments, invalid UTF-8, invalid frame state, a closed screen or font, and unavailable hardware raise Lua errors. Use `pcall` when a scene should recover from an expected failure. Tests and runnable examples are in [`test/`](test/).
 
-`options` currently supports:
-- `font_size` as an integer
-
-Returns:
-- `width`
-- `height`
-
-Example:
-
-```lua
-local tw, th = display.measure_text("hello", { font_size = 24 })
-```
-
-### `display.draw_text_aligned(x, y, width, height, text [, options])`
-
-Draws ASCII text inside a rectangle with alignment.
-
-`options` supports:
-- `color`
-- `font_size` as an integer
-- `bg`
-- `align`: `"left"`, `"center"`/`"centre"`, or `"right"`
-- `valign`: `"top"`, `"middle"`/`"center"`, or `"bottom"`
-
-Example:
-
-```lua
-display.draw_text_aligned(0, 0, display.width, 32, "status", {
-    color = "white",
-    font_size = 16,
-    align = "center",
-    valign = "middle",
-})
-```
-
-## Basic drawing primitives
-
-### `display.clear(color)`
-
-Clears the screen or current frame buffer to a solid color.
-
-### `display.set_clip_rect(x, y, width, height)`
-
-Sets a clipping rectangle. Subsequent drawing is restricted to that region until cleared.
-
-### `display.clear_clip_rect()`
-
-Removes the active clipping rectangle.
-
-### `display.fill_rect(x, y, width, height, color)`
-
-Draws a filled rectangle.
-
-### `display.draw_rect(x, y, width, height, color)`
-
-Draws a rectangle outline.
-
-### `display.draw_pixel(x, y, color)`
-
-Draws one pixel.
-
-### `display.draw_line(x0, y0, x1, y1, color)`
-
-Draws a line.
-
-## Shape drawing
-
-### `display.fill_circle(cx, cy, radius, color)`
-
-Draws a filled circle.
-
-### `display.draw_circle(cx, cy, radius, color)`
-
-Draws a circle outline.
-
-### `display.draw_arc(cx, cy, radius, start_deg, end_deg, color)`
-
-Draws an arc.
-
-- `start_deg` and `end_deg` are numeric values, not limited to integers
-
-### `display.fill_arc(cx, cy, inner_radius, outer_radius, start_deg, end_deg, color)`
-
-Draws a filled ring segment.
-
-### `display.draw_ellipse(cx, cy, radius_x, radius_y, color)`
-
-Draws an ellipse outline.
-
-### `display.fill_ellipse(cx, cy, radius_x, radius_y, color)`
-
-Draws a filled ellipse.
-
-### `display.draw_round_rect(x, y, width, height, radius, color)`
-
-Draws a rounded rectangle outline.
-
-### `display.fill_round_rect(x, y, width, height, radius, color)`
-
-Draws a filled rounded rectangle.
-
-### `display.draw_triangle(x1, y1, x2, y2, x3, y3, color)`
-
-Draws a triangle outline.
-
-### `display.fill_triangle(x1, y1, x2, y2, x3, y3, color)`
-
-Draws a filled triangle.
-
-## Raw pixel APIs
-
-These APIs draw RGB565 or RGB888 pixel buffers. Prefer `display.draw_image(...)` when the source is already an `image.frame`.
-
-### `display.draw_pixels(x, y, data, opts)`
-
-Draws a raw RGB565 or RGB888 pixel buffer.
-
-- `data` is either a Lua string containing at least `opts.width * opts.height * bytes_per_pixel` bytes, or a `lightuserdata` pointer to a buffer of that size
-- `opts` is required because raw buffers do not carry width or height metadata
-- `opts.format`: `"rgb565"` / `"rgb565le"` or `"rgb888"`; defaults to the panel's active pixel format (`display.pixel_format`)
-- The buffer format must match the panel's pixel format; a mismatch is rejected with an error
-- RGB565 input buffers are used as standard RGB565LE. RGB888 input buffers use normal R,G,B byte order from Lua and are converted to native BGR before drawing.
-- `opts.width`, `opts.height`: full source buffer size
-- `opts.mode`: `"raw"`, `"fit"`, `"cover"`, `"stretch"`, or `"crop"`; default is `"raw"`
-- `opts.dst_width`, `opts.dst_height`: destination size for stretch/cover/crop modes
-- `opts.max_width`, `opts.max_height`: fit box; accepted as aliases for fit destination size
-- `opts.source`: `{ x, y, width, height }` source rectangle. In raw mode this draws the source rectangle without scaling.
-- Returns `output_w, output_h`
-
-Examples:
-
-```lua
-display.draw_pixels(0, 0, rgb565_bytes, {
-    format = "rgb565",
-    width = 320,
-    height = 240,
-})
-
-display.draw_pixels(0, 0, rgb565_bytes, {
-    format = "rgb565",
-    width = 320,
-    height = 240,
-    mode = "fit",
-    max_width = display.width,
-    max_height = display.height,
-})
-
-display.draw_pixels(0, 0, rgb565_bytes, {
-    format = "rgb565",
-    width = 320,
-    height = 240,
-    mode = "crop",
-    source = { x = 40, y = 20, width = 160, height = 120 },
-    dst_width = 320,
-    dst_height = 240,
-})
-```
-
-### `display.draw_image(x, y, frame, opts)`
-
-Draws an `image.frame` directly. The display module requests the panel's
-active pixel format from the image module (RGB565LE when
-`display.pixel_format == "rgb565"`, native BGR888 when it is `"rgb888"`).
-The image module provides the requested display format for the duration of the call.
-
-`opts` is optional:
-
-- `mode`: `"raw"`, `"fit"`, `"cover"`, `"stretch"`, or `"crop"`; default is `"raw"`
-- `width`, `height`: destination size for fit/cover/stretch/crop modes
-- `source`: `{ x, y, width, height }` source rectangle for crop/cover modes
-
-Examples:
-
-```lua
-display.draw_image(0, 0, frame, {
-    mode = "fit",
-    width = display.width,
-    height = display.height,
-})
-
-display.draw_image(0, 0, frame, {
-    mode = "crop",
-    source = { x = 20, y = 20, width = 160, height = 120 },
-    width = 320,
-    height = 240,
-})
-```
-
-- Returns `output_w, output_h`
-- The call is synchronous and does not retain the image buffer after returning
-
-## Error behavior and constraints
-
-- Most APIs raise Lua errors directly when arguments are invalid or drawing fails
-- Integer-only APIs reject non-integer Lua values
-- File path validation is handled by the `image` module when loading or saving image files
-- `draw_pixels(...)` rejects buffers that are too short
-- `draw_text(...)` and `draw_text_aligned(...)` reject non-ASCII text
-
-## Recommended usage pattern
-
-For normal screen rendering:
-1. Use `board_manager.get_display_lcd_params("display_lcd")`
-2. Call `display.init(...)`
-3. Call `display.begin_frame(...)`
-4. Draw text, shapes, or images
-5. Call `display.present()` or `display.present_full()`
-6. Call `display.end_frame()`
-7. Call `display.deinit()` before exit
-
-## Example
-
-```lua
-local bm = require("board_manager")
-local display = require("display")
-
-local panel_handle, io_handle, width, height, panel_if =
-    bm.get_display_lcd_params("display_lcd")
-
-display.init(panel_handle, io_handle, width, height, panel_if)
-
-display.begin_frame({ clear = true, color = "#0c1220" })
-
-display.draw_rect(12, 12, display.width - 24, display.height - 24, { r = 80, g = 120, b = 160 })
-display.fill_rect(20, 40, 80, 36, "#48d0eb")
-display.draw_text(24, 90, "Lua Display Demo", {
-    color = "#f5f4ee",
-    font_size = 24,
-})
-display.draw_text_aligned(0, display.height - 24, display.width, 20, "frame api", {
-    color = { r = 210, g = 220, b = 228 },
-    font_size = 16,
-    align = "center",
-    valign = "middle",
-})
-
-display.present()
-display.end_frame()
-display.deinit()
-```
+For animation, load images and fonts once, reuse prepared colors and pixel strings, and submit each frame with one `begin()` / `present()` pair.

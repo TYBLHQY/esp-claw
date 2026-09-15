@@ -1,7 +1,12 @@
-local board_manager = require("board_manager")
 local camera = require("camera")
 local delay = require("delay")
 local display = require("display")
+local screen, screen_info
+
+local function center_text(x, y, w, h, text, options)
+    local tw, th = screen:measure_text(text, options)
+    screen:text(x + math.max(0, (w - tw) // 2), y + math.max(0, (h - th) // 2), text, options)
+end
 local image = require("image")
 local motion = require("motion_detect")
 
@@ -23,32 +28,8 @@ local camera_started = false
 local detector = motion.new(MOTION_OPTS)
 
 local function fit_size(src_w, src_h, max_w, max_h)
-    if src_w <= max_w and src_h <= max_h then
-        return src_w, src_h
-    end
-
     local ratio = math.min(max_w / src_w, max_h / src_h)
-    local draw_w = math.floor(src_w * ratio)
-    local draw_h = math.floor(src_h * ratio)
-    if draw_w <= 0 then
-        draw_w = 1
-    end
-    if draw_h <= 0 then
-        draw_h = 1
-    end
-    if draw_w >= 8 then
-        draw_w = draw_w - (draw_w % 8)
-        if draw_w == 0 then
-            draw_w = 8
-        end
-    end
-    if draw_h >= 8 then
-        draw_h = draw_h - (draw_h % 8)
-        if draw_h == 0 then
-            draw_h = 8
-        end
-    end
-    return draw_w, draw_h
+    return math.max(1, math.floor(src_w * ratio)), math.max(1, math.floor(src_h * ratio))
 end
 
 local function clamp(value, min_value, max_value)
@@ -67,28 +48,28 @@ local function draw_motion_box(detect_result, image_w, image_h)
         return
     end
 
-    -- Match display.draw_image(..., mode = "fit") so the overlay box follows the preview pixels.
-    local draw_w, draw_h = fit_size(image_w, image_h, display.width, display.height)
-    local x1 = clamp(math.floor((box.left or box.x or 0) * draw_w / image_w), 0, display.width - 1)
-    local y1 = clamp(math.floor((box.top or box.y or 0) * draw_h / image_h), 0, display.height - 1)
-    local x2 = clamp(math.floor(((box.right or ((box.x or 0) + (box.width or 1) - 1)) + 1) * draw_w / image_w) - 1, 0, display.width - 1)
-    local y2 = clamp(math.floor(((box.bottom or ((box.y or 0) + (box.height or 1) - 1)) + 1) * draw_h / image_h) - 1, 0, display.height - 1)
+    -- Match screen:image(..., mode = "contain") so the overlay box follows the preview pixels.
+    local draw_w, draw_h = fit_size(image_w, image_h, screen_info.width, screen_info.height)
+    local ox, oy = (screen_info.width - draw_w) // 2, (screen_info.height - draw_h) // 2
+    local x1 = clamp(ox + math.floor((box.left or box.x or 0) * draw_w / image_w), 0, screen_info.width - 1)
+    local y1 = clamp(oy + math.floor((box.top or box.y or 0) * draw_h / image_h), 0, screen_info.height - 1)
+    local x2 = clamp(ox + math.floor(((box.right or ((box.x or 0) + (box.width or 1) - 1)) + 1) * draw_w / image_w) - 1, 0, screen_info.width - 1)
+    local y2 = clamp(oy + math.floor(((box.bottom or ((box.y or 0) + (box.height or 1) - 1)) + 1) * draw_h / image_h) - 1, 0, screen_info.height - 1)
     local w = x2 - x1 + 1
     local h = y2 - y1 + 1
 
     if w <= 0 or h <= 0 then
         return
     end
-    display.draw_rect(x1, y1, w, h, { r = 255, g = 220, b = 40 })
+    screen:stroke_rect(x1, y1, w, h, { r = 255, g = 220, b = 40 })
     if w > 4 and h > 4 then
-        display.draw_rect(x1 + 1, y1 + 1, w - 2, h - 2, { r = 255, g = 48, b = 48 })
+        screen:stroke_rect(x1 + 1, y1 + 1, w - 2, h - 2, { r = 255, g = 48, b = 48 })
     end
 end
 
 local function cleanup()
     if display_started then
-        pcall(display.end_frame)
-        pcall(display.deinit)
+        pcall(screen.close, screen)
         display_started = false
     end
     if camera_started then
@@ -111,21 +92,15 @@ local function draw_result_overlay(frame_index, remaining_s, detect_result)
     end
 
     -- Draw an ASCII status bar after the camera preview so detection result is visible on screen.
-    display.fill_rect(0, 0, display.width, 48, bg)
-    display.draw_text(8, 6, string.format("motion: %s", status), {
-        color = "white",
+    screen:fill_rect(0, 0, screen_info.width, 48, bg)
+    screen:text(8, 6, string.format("motion: %s", status), {
+        color = "#ffffff",
         font_size = 16,
     })
-    display.draw_text(8, 28, string.format("score=%.3f frame=%d left=%ds", score, frame_index, remaining_s), {
-        color = "white",
+    screen:text(8, 28, string.format("score=%.3f frame=%d left=%ds", score, frame_index, remaining_s), {
+        color = "#ffffff",
         font_size = 12,
     })
-end
-
-local panel_handle, io_handle, lcd_width, lcd_height, panel_if = board_manager.get_display_lcd_params("display_lcd")
-if not panel_handle then
-    print(TAG .. " SKIP: get_display_lcd_params failed: " .. tostring(io_handle))
-    return
 end
 
 local camera_devices = camera.list_devices()
@@ -135,11 +110,13 @@ if #camera_devices == 0 then
 end
 local camera_path = camera_devices[1].path
 
-local ok, err = pcall(display.init, panel_handle, io_handle, lcd_width, lcd_height, panel_if)
+local ok, err = pcall(display.open)
 if not ok then
-    print(TAG .. " SKIP: display.init failed: " .. tostring(err))
+    print(TAG .. " SKIP: display.open failed: " .. tostring(err))
     return
 end
+screen = err
+screen_info = screen:info()
 display_started = true
 
 ok, err = pcall(camera.open, camera_path, CAMERA_OPEN_OPTS)
@@ -175,16 +152,15 @@ local run_ok, run_err = xpcall(function()
             moved_frames = moved_frames + 1
         end
 
-        display.begin_frame({ clear = true, color = "black" })
-        display.draw_image(0, 0, rgb565, {
-            mode = "fit",
-            width = display.width,
-            height = display.height,
+        screen:begin({ clear = "#000000" })
+        screen:image(0, 0, rgb565, {
+            mode = "contain",
+            width = screen_info.width,
+            height = screen_info.height,
         })
         draw_motion_box(detect_result, rgb_info.width, rgb_info.height)
         draw_result_overlay(frames, remaining_s, detect_result)
-        display.present()
-        display.end_frame()
+        screen:present()
 
         if frames == 1 or frames % 15 == 0 then
             print(string.format("%s frame=%d ready=%s motion=%s score=%.3f event=%s moved_frames=%d",
@@ -195,15 +171,12 @@ local run_ok, run_err = xpcall(function()
         ticker:wait()
     end
 
-    display.begin_frame({ clear = true, color = "black" })
-    display.draw_text_aligned(0, 0, display.width, display.height, string.format("Motion test done\nframes=%d moved=%d", frames, moved_frames), {
-        color = "white",
+    screen:begin({ clear = "#000000" })
+    center_text(0, 0, screen_info.width, screen_info.height, string.format("Motion test done\nframes=%d moved=%d", frames, moved_frames), {
+        color = "#ffffff",
         font_size = 20,
-        align = "center",
-        valign = "middle",
     })
-    display.present()
-    display.end_frame()
+    screen:present()
 
     print(string.format("%s PASS frames=%d moved_frames=%d", TAG, frames, moved_frames))
 end, debug.traceback)

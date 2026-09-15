@@ -26,6 +26,22 @@ typedef struct {
 typedef struct display_service_session_t *display_service_session_handle_t;
 
 typedef enum {
+    DISPLAY_SERVICE_PANEL_INTERFACE_SPI = 0,
+    DISPLAY_SERVICE_PANEL_INTERFACE_I80,
+    DISPLAY_SERVICE_PANEL_INTERFACE_RGB,
+    DISPLAY_SERVICE_PANEL_INTERFACE_DSI,
+    DISPLAY_SERVICE_PANEL_INTERFACE_PARLIO,
+} display_service_panel_interface_t;
+
+typedef struct {
+    uint16_t width;
+    uint16_t height;
+    uint32_t bits_per_pixel;
+    display_service_panel_interface_t panel_interface;
+    bool touch_available;
+} display_service_info_t;
+
+typedef enum {
     DISPLAY_SERVICE_MODE_SHARED_LVGL = 0,
     DISPLAY_SERVICE_MODE_EXCLUSIVE_LVGL,
     DISPLAY_SERVICE_MODE_EXCLUSIVE_RAW,
@@ -76,7 +92,6 @@ typedef struct {
 typedef struct {
     uint8_t count;
     display_service_touch_point_t points[CONFIG_ESP_LCD_TOUCH_MAX_POINTS];
-    uint32_t generation;
 } display_service_touch_snapshot_t;
 
 typedef void (*display_service_touch_observer_cb_t)(const display_service_touch_snapshot_t *snapshot,
@@ -108,6 +123,7 @@ const char *display_service_session_owner_name(display_service_session_handle_t 
 esp_err_t display_service_session_load_screen(display_service_session_handle_t session, lv_obj_t *screen);
 esp_err_t display_service_session_load_screen_locked(display_service_session_handle_t session, lv_obj_t *screen);
 lv_display_t *display_service_session_display(display_service_session_handle_t session);
+esp_err_t display_service_session_get_info(display_service_session_handle_t session, display_service_info_t *info);
 esp_err_t display_service_session_raw_blit(display_service_session_handle_t session,
                                            const display_service_raw_blit_t *blit);
 esp_err_t display_service_session_get_touch_snapshot(display_service_session_handle_t session,

@@ -1,7 +1,7 @@
-local board_manager = require("board_manager")
 local camera = require("camera")
 local delay = require("delay")
 local display = require("display")
+local screen, screen_info
 local image = require("image")
 local qrcode = require("qrcode_detect")
 
@@ -19,23 +19,24 @@ local function clamp(value, min_value, max_value)
 end
 
 local function draw_codes(result, image_w, image_h)
-    local scale = math.min(1, display.width / image_w, display.height / image_h)
+    local scale = math.min(screen_info.width / image_w, screen_info.height / image_h)
     local draw_w = math.floor(image_w * scale)
     local draw_h = math.floor(image_h * scale)
+    local ox, oy = (screen_info.width - draw_w) // 2, (screen_info.height - draw_h) // 2
 
-    -- Match display.draw_image(..., mode = "fit").
+    -- Match screen:image(..., mode = "contain").
     for i = 1, result.count do
         local code = result[i]
-        local x1 = clamp(math.floor(code.left * draw_w / image_w), 0, display.width - 1)
-        local y1 = clamp(math.floor(code.top * draw_h / image_h), 0, display.height - 1)
-        local x2 = clamp(math.floor((code.right + 1) * draw_w / image_w) - 1, 0, display.width - 1)
-        local y2 = clamp(math.floor((code.bottom + 1) * draw_h / image_h) - 1, 0, display.height - 1)
+        local x1 = clamp(ox + math.floor(code.left * draw_w / image_w), 0, screen_info.width - 1)
+        local y1 = clamp(oy + math.floor(code.top * draw_h / image_h), 0, screen_info.height - 1)
+        local x2 = clamp(ox + math.floor((code.right + 1) * draw_w / image_w) - 1, 0, screen_info.width - 1)
+        local y2 = clamp(oy + math.floor((code.bottom + 1) * draw_h / image_h) - 1, 0, screen_info.height - 1)
         local width = x2 - x1 + 1
         local height = y2 - y1 + 1
         if width > 0 and height > 0 then
-            display.draw_rect(x1, y1, width, height, { r = 80, g = 255, b = 80 })
+            screen:stroke_rect(x1, y1, width, height, { r = 80, g = 255, b = 80 })
             if width > 4 and height > 4 then
-                display.draw_rect(x1 + 1, y1 + 1, width - 2, height - 2, { r = 255, g = 255, b = 64 })
+                screen:stroke_rect(x1 + 1, y1 + 1, width - 2, height - 2, { r = 255, g = 255, b = 64 })
             end
         end
     end
@@ -43,15 +44,14 @@ end
 
 local function draw_status(frames, decoded, count)
     local found = count > 0
-    display.fill_rect(0, 0, display.width, 48, found and { r = 24, g = 112, b = 48 } or { r = 24, g = 24, b = 24 })
-    display.draw_text(8, 6, found and "QR: FOUND" or "QR: SEARCH", { color = "white", font_size = 16 })
-    display.draw_text(8, 28, string.format("found=%d decoded=%d frame=%d", count, decoded, frames), { color = "white", font_size = 12 })
+    screen:fill_rect(0, 0, screen_info.width, 48, found and { r = 24, g = 112, b = 48 } or { r = 24, g = 24, b = 24 })
+    screen:text(8, 6, found and "QR: FOUND" or "QR: SEARCH", { color = "#ffffff", font_size = 16 })
+    screen:text(8, 28, string.format("found=%d decoded=%d frame=%d", count, decoded, frames), { color = "#ffffff", font_size = 12 })
 end
 
 local function cleanup()
     if display_started then
-        pcall(display.end_frame)
-        pcall(display.deinit)
+        pcall(screen.close, screen)
         display_started = false
     end
     if camera_started then
@@ -60,23 +60,19 @@ local function cleanup()
     end
 end
 
-local panel_handle, io_handle, lcd_width, lcd_height, panel_if = board_manager.get_display_lcd_params("display_lcd")
-if not panel_handle then
-    print(TAG .. " SKIP: get_display_lcd_params failed: " .. tostring(io_handle))
-    return
-end
-
 local devices = camera.list_devices()
 if #devices == 0 then
     print(TAG .. " SKIP: no capture video device available")
     return
 end
 
-local ok, err = pcall(display.init, panel_handle, io_handle, lcd_width, lcd_height, panel_if)
+local ok, err = pcall(display.open)
 if not ok then
-    print(TAG .. " SKIP: display.init failed: " .. tostring(err))
+    print(TAG .. " SKIP: display.open failed: " .. tostring(err))
     return
 end
+screen = err
+screen_info = screen:info()
 display_started = true
 
 ok, err = pcall(camera.open, devices[1].path, CAMERA_OPEN_OPTS)
@@ -103,12 +99,11 @@ local run_ok, run_err = xpcall(function()
         frames = frames + 1
         decoded = decoded + result.count
 
-        display.begin_frame({ clear = true, color = "black" })
-        display.draw_image(0, 0, rgb565, { mode = "fit", width = display.width, height = display.height })
+        screen:begin({ clear = "#000000" })
+        screen:image(0, 0, rgb565, { mode = "contain", width = screen_info.width, height = screen_info.height })
         draw_codes(result, frame_info.width, frame_info.height)
         draw_status(frames, decoded, result.count)
-        display.present()
-        display.end_frame()
+        screen:present()
 
         for i = 1, result.count do
             local code = result[i]

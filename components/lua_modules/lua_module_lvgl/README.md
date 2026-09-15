@@ -7,7 +7,7 @@ This document is an API guide for building LVGL UIs from Lua with the `lvgl` mod
 - Import the module with `local lvgl = require("lvgl")`.
 - Call `lvgl.init([opts])` before creating screens or widgets.
 - All widget operations are userdata methods. Use `btn:set_text("OK")`, not `lvgl.set_text(btn, "OK")`.
-- Only one Lua script can own the LVGL runtime at a time. Do not use `display.init(...)` and `lvgl.init(...)` together.
+- Only one Lua script can own the LVGL runtime at a time. Do not use `display.open(...)` and `lvgl.init(...)` together.
 - Call `lvgl.deinit()` before the script exits. The module also cleans up automatically if the owner script exits unexpectedly.
 - Object handles become invalid after `obj:delete()`, after a parent object is deleted, or after `lvgl.deinit()`.
 - After registering events, call `lvgl.run()` or repeatedly call `lvgl.process_events(...)`; otherwise Lua callbacks will not run.

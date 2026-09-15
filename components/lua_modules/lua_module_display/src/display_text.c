@@ -1,256 +1,244 @@
 /*
  * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "display_text.h"
 
-#include <stdbool.h>
-#include <stdint.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include "display_color.h"
-#include "display_hal.h"
-#include "esp_err.h"
 #include "esp_log.h"
-#include "lauxlib.h"
+#include "esp_painter_font.h"
+
+#define FONT_MAX_DIMENSION 64
+#define FONT_MIN_SIZE 8
+#define FONT_MAX_GLYPHS 4096
+#define FONT_MAX_BYTES (1024 * 1024)
 
 static const char *TAG = "display_text";
 
+struct display_font_t {
+    uint16_t width, height;
+    uint32_t count;
+    size_t record_size;
+    uint8_t records[];
+};
+
 typedef struct {
-    display_color_t color;
-    display_color_t bg;
-    bool has_bg;
-    uint8_t font_size;
-    display_hal_text_align_t align;
-    display_hal_text_valign_t valign;
-} display_text_style_t;
+    const esp_painter_basic_font_t *builtin;
+    display_font_handle_t custom;
+    int width, height;
+    int source_width, source_height;
+    uint8_t columns[FONT_MAX_DIMENSION];
+} font_view_t;
 
-static int display_text_check_integer_arg(lua_State *L, int index, const char *name)
+static uint32_t read32(const uint8_t *p)
 {
-    if (!lua_isinteger(L, index)) {
-        ESP_LOGE(TAG, "%s is not an integer", name);
-        return luaL_error(L, "display %s must be an integer", name);
-    }
-    return (int)lua_tointeger(L, index);
+    return p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-static uint8_t display_text_check_font_size(lua_State *L, int index)
+static bool valid_codepoint(uint32_t cp)
 {
-    int font_size = display_text_check_integer_arg(L, index, "font_size");
-    if (font_size <= 0 || font_size > UINT8_MAX) {
-        ESP_LOGE(TAG, "font_size out of range: %d", font_size);
-        luaL_error(L, "display font_size must be between 1 and 255");
-    }
-    return (uint8_t)font_size;
+    return cp <= 0x10FFFF && (cp < 0xD800 || cp > 0xDFFF);
 }
 
-static bool display_text_is_ascii(const char *text)
+esp_err_t display_font_create(const char *path, display_font_handle_t *ret_font)
 {
-    if (!text) {
-        return false;
+    if (!path || !ret_font) return ESP_ERR_INVALID_ARG;
+    *ret_font = NULL;
+    FILE *file = fopen(path, "rb");
+    if (!file) { ESP_LOGE(TAG, "font open failed"); return ESP_ERR_NOT_FOUND; }
+    esp_err_t err = ESP_ERR_INVALID_SIZE;
+    display_font_handle_t font = NULL;
+    uint8_t header[12];
+    if (fread(header, 1, sizeof(header), file) != sizeof(header) || memcmp(header, "DFN1", 4)) goto done;
+    unsigned width = header[4] | ((unsigned)header[5] << 8);
+    unsigned height = header[6] | ((unsigned)header[7] << 8);
+    uint32_t count = read32(header + 8);
+    if (!width || width > FONT_MAX_DIMENSION || !height || height > FONT_MAX_DIMENSION || !count || count > FONT_MAX_GLYPHS) goto done;
+    size_t record_size = 4 + ((width + 7) / 8) * height;
+    size_t bytes = record_size * count;
+    if (bytes > FONT_MAX_BYTES - sizeof(header)) goto done;
+    font = malloc(sizeof(*font) + bytes);
+    if (!font) { err = ESP_ERR_NO_MEM; goto done; }
+    font->width = width;
+    font->height = height;
+    font->count = count;
+    font->record_size = record_size;
+    if (fread(font->records, 1, bytes, file) != bytes || fgetc(file) != EOF || ferror(file)) goto done;
+    uint32_t previous = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t cp = read32(font->records + i * record_size);
+        if (!valid_codepoint(cp) || (i && cp <= previous)) goto done;
+        previous = cp;
     }
-    while (*text) {
-        unsigned char ch = (unsigned char)*text++;
-        if ((ch < 32 || ch > 126) && ch != '\n' && ch != '\r' && ch != '\t') {
-            return false;
+    err = ESP_OK;
+done:
+    fclose(file);
+    if (err != ESP_OK) {
+        free(font);
+        ESP_LOGE(TAG, "font load failed: %s", esp_err_to_name(err));
+    } else *ret_font = font;
+    return err;
+}
+
+void display_font_delete(display_font_handle_t font)
+{
+    free(font);
+}
+
+static const esp_painter_basic_font_t *builtin_font(void)
+{
+#if CONFIG_ESP_PAINTER_BASIC_FONT_24
+    return &esp_painter_basic_font_24;
+#elif CONFIG_ESP_PAINTER_BASIC_FONT_20
+    return &esp_painter_basic_font_20;
+#elif CONFIG_ESP_PAINTER_BASIC_FONT_16
+    return &esp_painter_basic_font_16;
+#elif CONFIG_ESP_PAINTER_BASIC_FONT_12
+    return &esp_painter_basic_font_12;
+#elif CONFIG_ESP_PAINTER_BASIC_FONT_28
+    return &esp_painter_basic_font_28;
+#elif CONFIG_ESP_PAINTER_BASIC_FONT_32
+    return &esp_painter_basic_font_32;
+#elif CONFIG_ESP_PAINTER_BASIC_FONT_36
+    return &esp_painter_basic_font_36;
+#elif CONFIG_ESP_PAINTER_BASIC_FONT_40
+    return &esp_painter_basic_font_40;
+#elif CONFIG_ESP_PAINTER_BASIC_FONT_44
+    return &esp_painter_basic_font_44;
+#elif CONFIG_ESP_PAINTER_BASIC_FONT_48
+    return &esp_painter_basic_font_48;
+#else
+    return NULL;
+#endif
+}
+
+static esp_err_t font_view(const display_text_options_t *options, font_view_t *view)
+{
+    view->custom = options->font;
+    view->builtin = options->font ? NULL : builtin_font();
+    if (!view->custom && !view->builtin) return ESP_ERR_NOT_SUPPORTED;
+    view->source_width = view->custom ? view->custom->width : view->builtin->width;
+    view->source_height = view->custom ? view->custom->height : view->builtin->height;
+    view->width = view->source_width;
+    view->height = view->source_height;
+    if (!view->custom) {
+        if (options->font_size < FONT_MIN_SIZE || options->font_size > FONT_MAX_DIMENSION) return ESP_ERR_INVALID_ARG;
+        view->height = options->font_size;
+        view->width = (view->source_width * view->height + view->source_height / 2) / view->source_height;
+        if (view->width < 1) view->width = 1;
+    }
+    if (view->width > FONT_MAX_DIMENSION) return ESP_ERR_INVALID_SIZE;
+    /* Reuse the horizontal mapping for every glyph, with no per-pixel division. */
+    for (int x = 0; x < view->width; x++) view->columns[x] = x * view->source_width / view->width;
+    return ESP_OK;
+}
+
+static const uint8_t *find_glyph(display_font_handle_t font, uint32_t cp)
+{
+    uint32_t lo = 0, hi = font->count;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        const uint8_t *record = font->records + mid * font->record_size;
+        uint32_t code = read32(record);
+        if (code == cp) return record + 4;
+        if (code < cp) lo = mid + 1;
+        else hi = mid;
+    }
+    return NULL;
+}
+
+static const uint8_t *glyph(const font_view_t *font, uint32_t cp)
+{
+    if (font->builtin) {
+        if (cp < 32 || cp > 126) return NULL;
+        return font->builtin->bitmap + (cp - 32) * ((font->source_width + 7) / 8) * font->source_height;
+    }
+    const uint8_t *bitmap = find_glyph(font->custom, cp);
+    return bitmap ? bitmap : find_glyph(font->custom, '?');
+}
+
+static bool next_codepoint(const char *text, size_t length, size_t *offset, uint32_t *cp)
+{
+    uint8_t lead = (uint8_t)text[(*offset)++];
+    if (lead < 0x80) { *cp = lead; return true; }
+    int count;
+    uint32_t minimum;
+    if (lead >= 0xC2 && lead <= 0xDF) { count = 1; *cp = lead & 31; minimum = 0x80; }
+    else if (lead >= 0xE0 && lead <= 0xEF) { count = 2; *cp = lead & 15; minimum = 0x800; }
+    else if (lead >= 0xF0 && lead <= 0xF4) { count = 3; *cp = lead & 7; minimum = 0x10000; }
+    else return false;
+    if (length - *offset < (size_t)count) return false;
+    for (int i = 0; i < count; i++) {
+        uint8_t ch = (uint8_t)text[(*offset)++];
+        if ((ch & 0xC0) != 0x80) return false;
+        *cp = (*cp << 6) | (ch & 63);
+    }
+    return *cp >= minimum && valid_codepoint(*cp);
+}
+
+static void draw_glyph(display_raster_t *r, int64_t x, int64_t y, const uint8_t *bitmap, const font_view_t *font, display_color_t color)
+{
+    int64_t clip_left = (int64_t)r->x0 - r->tx, clip_top = (int64_t)r->y0 - r->ty;
+    int64_t clip_right = (int64_t)r->x1 - r->tx, clip_bottom = (int64_t)r->y1 - r->ty;
+    if (x >= clip_right || y >= clip_bottom || x + font->width <= clip_left || y + font->height <= clip_top) return;
+    int stride = (font->source_width + 7) / 8;
+    for (int row = 0; row < font->height; row++) {
+        if (y + row < clip_top || y + row >= clip_bottom) continue;
+        const uint8_t *source = bitmap + (row * font->source_height / font->height) * stride;
+        int run = -1;
+        for (int col = 0; col <= font->width; col++) {
+            int sx = col < font->width ? font->columns[col] : 0;
+            bool on = col < font->width && (source[sx / 8] & (0x80U >> (sx & 7)));
+            if (on && run < 0) run = col;
+            if (!on && run >= 0) {
+                display_raster_span(r, x + run, x + col, y + row, color);
+                run = -1;
+            }
         }
     }
-    return true;
 }
 
-static void display_text_reject_table_field(lua_State *L, int index, const char *field)
+static esp_err_t walk_text(display_raster_t *r, int x, int y, const char *text, size_t length, const display_text_options_t *options, int *width, int *height)
 {
-    lua_getfield(L, index, field);
-    bool exists = !lua_isnil(L, -1);
-    lua_pop(L, 1);
-    if (exists) {
-        luaL_error(L, "display text options no longer supports '%s'; use color or bg", field);
-    }
-}
-
-static display_hal_text_align_t display_text_parse_align(lua_State *L, int index, display_hal_text_align_t default_align)
-{
-    const char *value = lua_tostring(L, index);
-    if (!value || strcmp(value, "left") == 0) {
-        return DISPLAY_HAL_TEXT_ALIGN_LEFT;
-    }
-    if (strcmp(value, "center") == 0 || strcmp(value, "centre") == 0) {
-        return DISPLAY_HAL_TEXT_ALIGN_CENTER;
-    }
-    if (strcmp(value, "right") == 0) {
-        return DISPLAY_HAL_TEXT_ALIGN_RIGHT;
-    }
-    luaL_error(L, "display align must be left, center, or right");
-    return default_align;
-}
-
-static display_hal_text_valign_t display_text_parse_valign(lua_State *L, int index, display_hal_text_valign_t default_valign)
-{
-    const char *value = lua_tostring(L, index);
-    if (!value || strcmp(value, "top") == 0) {
-        return DISPLAY_HAL_TEXT_VALIGN_TOP;
-    }
-    if (strcmp(value, "middle") == 0 || strcmp(value, "center") == 0) {
-        return DISPLAY_HAL_TEXT_VALIGN_MIDDLE;
-    }
-    if (strcmp(value, "bottom") == 0) {
-        return DISPLAY_HAL_TEXT_VALIGN_BOTTOM;
-    }
-    luaL_error(L, "display valign must be top, middle, or bottom");
-    return default_valign;
-}
-
-static void display_text_style_init_default(display_text_style_t *style)
-{
-    if (!style) {
-        ESP_LOGE(TAG, "text style output is NULL");
-        return;
-    }
-
-    /* Keep defaults centralized so every text API behaves consistently. */
-    style->color = (display_color_t) {
-        .r = 255,
-        .g = 255,
-        .b = 255,
-        .a = 255,
-    };
-    style->bg = (display_color_t) {
-        .r = 0,
-        .g = 0,
-        .b = 0,
-        .a = 255,
-    };
-    style->has_bg = false;
-    style->font_size = 24;
-    style->align = DISPLAY_HAL_TEXT_ALIGN_LEFT;
-    style->valign = DISPLAY_HAL_TEXT_VALIGN_TOP;
-}
-
-static void display_text_style_from_lua(lua_State *L, int index, display_text_style_t *style)
-{
-    display_text_style_init_default(style);
-    if (lua_isnoneornil(L, index)) {
-        return;
-    }
-
-    luaL_checktype(L, index, LUA_TTABLE);
-    display_text_reject_table_field(L, index, "r");
-    display_text_reject_table_field(L, index, "g");
-    display_text_reject_table_field(L, index, "b");
-    display_text_reject_table_field(L, index, "bg_r");
-    display_text_reject_table_field(L, index, "bg_g");
-    display_text_reject_table_field(L, index, "bg_b");
-
-    lua_getfield(L, index, "color");
-    if (!lua_isnil(L, -1)) {
-        esp_err_t err = display_color_from_lua(L, -1, &style->color);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "text color parse failed: %s", esp_err_to_name(err));
-            luaL_error(L, "display text color invalid: %s", esp_err_to_name(err));
+    font_view_t font;
+    esp_err_t err = font_view(options, &font);
+    if (err != ESP_OK) return err;
+    int64_t column = 0, row = 0, widest = 0;
+    for (size_t offset = 0; offset < length;) {
+        uint32_t cp;
+        if (!next_codepoint(text, length, &offset, &cp)) return ESP_ERR_INVALID_ARG;
+        if (cp == '\n' || cp == '\r') {
+            if (column > widest) widest = column;
+            column = 0;
+            if (cp == '\n') row += font.height;
+        } else if (cp == '\t') column += font.width * 4;
+        else {
+            const uint8_t *bitmap = glyph(&font, cp);
+            if (!bitmap) return ESP_ERR_NOT_FOUND;
+            if (r && options->color.a) draw_glyph(r, (int64_t)x + column, (int64_t)y + row, bitmap, &font, options->color);
+            column += font.width;
         }
+        if (column > INT_MAX || row + font.height > INT_MAX) return ESP_ERR_INVALID_SIZE;
     }
-    lua_pop(L, 1);
-
-    lua_getfield(L, index, "font_size");
-    if (!lua_isnil(L, -1)) {
-        style->font_size = display_text_check_font_size(L, -1);
-    }
-    lua_pop(L, 1);
-
-    lua_getfield(L, index, "bg");
-    if (!lua_isnil(L, -1)) {
-        esp_err_t err = display_color_from_lua(L, -1, &style->bg);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "text background parse failed: %s", esp_err_to_name(err));
-            luaL_error(L, "display text background invalid: %s", esp_err_to_name(err));
-        }
-        style->has_bg = true;
-    }
-    lua_pop(L, 1);
-
-    lua_getfield(L, index, "align");
-    if (!lua_isnil(L, -1)) {
-        style->align = display_text_parse_align(L, -1, style->align);
-    }
-    lua_pop(L, 1);
-
-    lua_getfield(L, index, "valign");
-    if (!lua_isnil(L, -1)) {
-        style->valign = display_text_parse_valign(L, -1, style->valign);
-    }
-    lua_pop(L, 1);
+    if (column > widest) widest = column;
+    if (width) *width = (int)widest;
+    if (height) *height = length ? (int)(row + font.height) : 0;
+    return ESP_OK;
 }
 
-static int display_text_draw(lua_State *L)
+esp_err_t display_text_measure(const char *text, size_t length, const display_text_options_t *options, int *width, int *height)
 {
-    int x = display_text_check_integer_arg(L, 1, "x");
-    int y = display_text_check_integer_arg(L, 2, "y");
-    const char *text = luaL_checkstring(L, 3);
-    display_text_style_t style;
-
-    if (!display_text_is_ascii(text)) {
-        return luaL_error(L, "display draw_text only supports ASCII text");
-    }
-
-    display_text_style_from_lua(L, 4, &style);
-
-    esp_err_t err = display_hal_draw_text(x, y, text, style.font_size, style.color, style.has_bg, style.bg);
-    if (err != ESP_OK) {
-        return luaL_error(L, "display draw_text failed: %s", esp_err_to_name(err));
-    }
-    return 0;
+    if (!text || !options || !width || !height) return ESP_ERR_INVALID_ARG;
+    return walk_text(NULL, 0, 0, text, length, options, width, height);
 }
 
-static int display_text_measure(lua_State *L)
+esp_err_t display_text_draw(display_raster_t *r, int x, int y, const char *text, size_t length, const display_text_options_t *options)
 {
-    const char *text = luaL_checkstring(L, 1);
-    display_text_style_t style;
-    uint16_t width = 0;
-    uint16_t height = 0;
-
-    display_text_style_from_lua(L, 2, &style);
-    if (!display_text_is_ascii(text)) {
-        return luaL_error(L, "display measure_text only supports ASCII text");
-    }
-
-    esp_err_t err = display_hal_measure_text(text, style.font_size, &width, &height);
-    if (err != ESP_OK) {
-        return luaL_error(L, "display measure_text failed: %s", esp_err_to_name(err));
-    }
-    lua_pushinteger(L, width);
-    lua_pushinteger(L, height);
-    return 2;
-}
-
-static int display_text_draw_aligned(lua_State *L)
-{
-    int x = display_text_check_integer_arg(L, 1, "x");
-    int y = display_text_check_integer_arg(L, 2, "y");
-    int width = display_text_check_integer_arg(L, 3, "width");
-    int height = display_text_check_integer_arg(L, 4, "height");
-    const char *text = luaL_checkstring(L, 5);
-    display_text_style_t style;
-
-    if (!display_text_is_ascii(text)) {
-        return luaL_error(L, "display draw_text_aligned only supports ASCII text");
-    }
-
-    display_text_style_from_lua(L, 6, &style);
-
-    esp_err_t err = display_hal_draw_text_aligned(x, y, width, height, text, style.font_size,
-                                                  style.color, style.has_bg, style.bg, style.align, style.valign);
-    if (err != ESP_OK) {
-        return luaL_error(L, "display draw_text_aligned failed: %s", esp_err_to_name(err));
-    }
-    return 0;
-}
-
-void display_text_register_lua(lua_State *L)
-{
-    lua_pushcfunction(L, display_text_measure);
-    lua_setfield(L, -2, "measure_text");
-    lua_pushcfunction(L, display_text_draw);
-    lua_setfield(L, -2, "draw_text");
-    lua_pushcfunction(L, display_text_draw_aligned);
-    lua_setfield(L, -2, "draw_text_aligned");
+    if (!r || !text || !options) return ESP_ERR_INVALID_ARG;
+    /* Validate all glyphs before modifying the framebuffer. */
+    esp_err_t err = walk_text(NULL, 0, 0, text, length, options, NULL, NULL);
+    return err == ESP_OK ? walk_text(r, x, y, text, length, options, NULL, NULL) : err;
 }
