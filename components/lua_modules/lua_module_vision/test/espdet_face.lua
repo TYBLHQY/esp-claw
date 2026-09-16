@@ -1,7 +1,7 @@
-local board_manager = require("board_manager")
 local camera = require("camera")
 local delay = require("delay")
 local display = require("display")
+local screen, screen_info
 local espdet = require("espdet")
 local image = require("image")
 local storage = require("storage")
@@ -26,32 +26,33 @@ local function clamp(value, min_value, max_value)
 end
 
 local function draw_faces(result, image_w, image_h)
-    local scale = math.min(1, display.width / image_w, display.height / image_h)
+    local scale = math.min(screen_info.width / image_w, screen_info.height / image_h)
     local draw_w = math.floor(image_w * scale)
     local draw_h = math.floor(image_h * scale)
+    local ox, oy = (screen_info.width - draw_w) // 2, (screen_info.height - draw_h) // 2
 
-    -- Match display.draw_image(..., mode = "fit").
+    -- Match screen:image(..., mode = "contain").
     for i = 1, result.count do
         local face = result[i]
-        local x1 = clamp(math.floor(face.left * draw_w / image_w), 0, display.width - 1)
-        local y1 = clamp(math.floor(face.top * draw_h / image_h), 0, display.height - 1)
-        local x2 = clamp(math.floor((face.right + 1) * draw_w / image_w) - 1, 0, display.width - 1)
-        local y2 = clamp(math.floor((face.bottom + 1) * draw_h / image_h) - 1, 0, display.height - 1)
+        local x1 = clamp(ox + math.floor(face.left * draw_w / image_w), 0, screen_info.width - 1)
+        local y1 = clamp(oy + math.floor(face.top * draw_h / image_h), 0, screen_info.height - 1)
+        local x2 = clamp(ox + math.floor((face.right + 1) * draw_w / image_w) - 1, 0, screen_info.width - 1)
+        local y2 = clamp(oy + math.floor((face.bottom + 1) * draw_h / image_h) - 1, 0, screen_info.height - 1)
         local width = x2 - x1 + 1
         local height = y2 - y1 + 1
         if width > 0 and height > 0 then
-            display.draw_rect(x1, y1, width, height, { r = 80, g = 255, b = 80 })
+            screen:stroke_rect(x1, y1, width, height, { r = 80, g = 255, b = 80 })
             if width > 4 and height > 4 then
-                display.draw_rect(x1 + 1, y1 + 1, width - 2, height - 2, { r = 255, g = 255, b = 64 })
+                screen:stroke_rect(x1 + 1, y1 + 1, width - 2, height - 2, { r = 255, g = 255, b = 64 })
             end
         end
 
         local points = face.keypoint
         if points then
             for point = 1, #points - 1, 2 do
-                local x = clamp(math.floor(points[point] * draw_w / image_w), 0, display.width - 1)
-                local y = clamp(math.floor(points[point + 1] * draw_h / image_h), 0, display.height - 1)
-                display.draw_circle(x, y, 2, { r = 255, g = 80, b = 80 })
+                local x = clamp(ox + math.floor(points[point] * draw_w / image_w), 0, screen_info.width - 1)
+                local y = clamp(oy + math.floor(points[point + 1] * draw_h / image_h), 0, screen_info.height - 1)
+                screen:stroke_circle(x, y, 2, { r = 255, g = 80, b = 80 })
             end
         end
     end
@@ -59,15 +60,14 @@ end
 
 local function draw_status(frames, faces)
     local found = faces > 0
-    display.fill_rect(0, 0, display.width, 48, found and { r = 24, g = 112, b = 48 } or { r = 24, g = 24, b = 24 })
-    display.draw_text(8, 6, found and "FACE: FOUND" or "FACE: SEARCH", { color = "white", font_size = 16 })
-    display.draw_text(8, 28, string.format("faces=%d frame=%d", faces, frames), { color = "white", font_size = 12 })
+    screen:fill_rect(0, 0, screen_info.width, 48, found and { r = 24, g = 112, b = 48 } or { r = 24, g = 24, b = 24 })
+    screen:text(8, 6, found and "FACE: FOUND" or "FACE: SEARCH", { color = "#ffffff", font_size = 16 })
+    screen:text(8, 28, string.format("faces=%d frame=%d", faces, frames), { color = "#ffffff", font_size = 12 })
 end
 
 local function cleanup()
     if display_started then
-        pcall(display.end_frame)
-        pcall(display.deinit)
+        pcall(screen.close, screen)
         display_started = false
     end
     if camera_started then
@@ -82,12 +82,6 @@ end
 
 assert(storage.exists(model_path), "face model not found: " .. model_path)
 
-local panel_handle, io_handle, lcd_width, lcd_height, panel_if = board_manager.get_display_lcd_params("display_lcd")
-if not panel_handle then
-    print(TAG .. " SKIP: get_display_lcd_params failed: " .. tostring(io_handle))
-    return
-end
-
 local devices = camera.list_devices()
 if #devices == 0 then
     print(TAG .. " SKIP: no capture video device available")
@@ -95,11 +89,13 @@ if #devices == 0 then
 end
 local device = type(a.device) == "string" and a.device or devices[1].path
 
-local ok, err = pcall(display.init, panel_handle, io_handle, lcd_width, lcd_height, panel_if)
+local ok, err = pcall(display.open)
 if not ok then
-    print(TAG .. " SKIP: display.init failed: " .. tostring(err))
+    print(TAG .. " SKIP: display.open failed: " .. tostring(err))
     return
 end
+screen = err
+screen_info = screen:info()
 display_started = true
 
 ok, err = pcall(camera.open, device, camera_open_opts)
@@ -127,12 +123,11 @@ local run_ok, run_err = xpcall(function()
         local result = espdet.detect(rgb565, { score_threshold = score_threshold })
         frames = frames + 1
 
-        display.begin_frame({ clear = true, color = "black" })
-        display.draw_image(0, 0, rgb565, { mode = "fit", width = display.width, height = display.height })
+        screen:begin({ clear = "#000000" })
+        screen:image(0, 0, rgb565, { mode = "contain", width = screen_info.width, height = screen_info.height })
         draw_faces(result, frame_info.width, frame_info.height)
         draw_status(frames, result.count)
-        display.present()
-        display.end_frame()
+        screen:present()
 
         if frames == 1 or frames % 10 == 0 then
             print(string.format("%s frame=%d faces=%d", TAG, frames, result.count))

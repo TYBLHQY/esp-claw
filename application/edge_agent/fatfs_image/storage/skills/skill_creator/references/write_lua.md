@@ -25,7 +25,7 @@ Prefer several consecutive `read_file` tool calls in the same step instead of re
 
 Builtin patterns:
 
-- Display scripts use `board_manager`, `display`, `delay`, `display.begin_frame`, `display.present`, `display.end_frame`, and `pcall(display.deinit)` cleanup.
+- Display scripts open the built-in screen with `local screen <close> = display.open()` and draw between `screen:begin()` and `screen:present()`. Cache `screen:info()` and call `screen:touch().points` only when `info.touch_available` is true. Use `display.color()` for reusable packed colors.
 - Long display animations or games should usually run async with `exclusive: "display"` and a stable `name`.
 - Async scripts should print short progress lines; running job logs can be read later with `lua_get_async_job` or incrementally with `lua_tail_async_job`.
 - Hardware scripts open resources in `run()`, close them in `cleanup()`, then wrap execution in `xpcall(run, debug.traceback)`.

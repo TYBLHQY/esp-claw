@@ -120,15 +120,19 @@ end
 local display = require("display")
 local image   = require("image")
 local storage = require("storage")
+local screen <close> = display.open()
+local info = screen:info()
 
 do
     local frame <close> = image.load_file(storage.join_path(storage.get_root_dir(), "picture.jpg"))
     local rgb565 <close> = image.convert(frame, image.RGB565)
-    display.draw_image(0, 0, rgb565, {
-        mode = "fit",
-        width = display.width,
-        height = display.height,
+    screen:begin()
+    screen:image(0, 0, rgb565, {
+        mode = "contain",
+        width = info.width,
+        height = info.height,
     })
+    screen:present()
     image.save_file(storage.join_path(storage.get_root_dir(), "copy.jpg"), frame)
 end
 ```

@@ -1,35 +1,35 @@
-local bm = require("board_manager")
 local display = require("display")
+local screen, screen_info
+
+local function center_text(x, y, w, h, text, options)
+    local tw, th = screen:measure_text(text, options)
+    screen:text(x + math.max(0, (w - tw) // 2), y + math.max(0, (h - th) // 2), text, options)
+end
 local delay = require("delay")
 
 local function rgb(r, g, b)
-    return { r = r, g = g, b = b }
+    return display.color(r, g, b)
 end
 
-local panel_handle, io_handle, width, height, panel_if = bm.get_display_lcd_params("display_lcd")
-if not panel_handle then
-    print("[lcd_touch_paint] ERROR: get_display_lcd_params(display_lcd) failed: " .. tostring(io_handle))
-    return
-end
-
-local ok, err = pcall(display.init, panel_handle, io_handle, width, height, panel_if)
+local ok, err = pcall(display.open)
 if not ok then
     print("[lcd_touch_paint] ERROR: init failed: " .. tostring(err))
     return
 end
+screen = err
+screen_info = screen:info()
 
 local screen_created = true
 
 local function cleanup()
     if screen_created then
-        pcall(display.end_frame)
-        pcall(display.deinit)
+        pcall(screen.close, screen)
         screen_created = false
     end
 end
 
-width = display.width
-height = display.height
+local width = screen_info.width
+local height = screen_info.height
 
 if width <= 0 or height <= 0 then
     print("[lcd_touch_paint] ERROR: invalid display size after init")
@@ -58,39 +58,28 @@ local BRUSH_R = 4
 local POLL_MS = 33
 
 local function draw_ui()
-    display.fill_rect(CLEAR_X, CLEAR_Y, CLEAR_W, CLEAR_H, ACCENT_COLOR)
-    display.draw_rect(CLEAR_X, CLEAR_Y, CLEAR_W, CLEAR_H, rgb(120, 30, 12))
-    display.draw_text_aligned(CLEAR_X, CLEAR_Y, CLEAR_W, CLEAR_H, "CLEAR", {
-        color = "white",
+    screen:begin({ clear = BG_COLOR })
+    screen:fill_rect(CLEAR_X, CLEAR_Y, CLEAR_W, CLEAR_H, ACCENT_COLOR)
+    screen:stroke_rect(CLEAR_X, CLEAR_Y, CLEAR_W, CLEAR_H, rgb(120, 30, 12))
+    center_text(CLEAR_X, CLEAR_Y, CLEAR_W, CLEAR_H, "CLEAR", {
+        color = "#ffffff",
         font_size = 16,
-        align = "center",
-        valign = "middle",
-        bg = ACCENT_COLOR,
     })
-    display.fill_rect(EXIT_X, EXIT_Y, EXIT_W, EXIT_H, rgb(70, 78, 88))
-    display.draw_rect(EXIT_X, EXIT_Y, EXIT_W, EXIT_H, rgb(30, 34, 40))
-    display.draw_text_aligned(EXIT_X, EXIT_Y, EXIT_W, EXIT_H, "EXIT", {
-        color = "white",
+    screen:fill_rect(EXIT_X, EXIT_Y, EXIT_W, EXIT_H, rgb(70, 78, 88))
+    screen:stroke_rect(EXIT_X, EXIT_Y, EXIT_W, EXIT_H, rgb(30, 34, 40))
+    center_text(EXIT_X, EXIT_Y, EXIT_W, EXIT_H, "EXIT", {
+        color = "#ffffff",
         font_size = 16,
-        align = "center",
-        valign = "middle",
-        bg = rgb(70, 78, 88),
     })
-    display.draw_text_aligned(0, 84, width, 24, "LCD Touch Paint", {
+    center_text(0, 84, width, 24, "LCD Touch Paint", {
         color = TEXT_COLOR,
         font_size = 20,
-        align = "center",
-        valign = "middle",
-        bg = BG_COLOR,
     })
-    display.draw_text_aligned(0, 108, width, 18, "draw with finger, tap CLEAR to wipe", {
+    center_text(0, 108, width, 18, "draw with finger, tap CLEAR to wipe", {
         color = rgb(90, 96, 104),
         font_size = 12,
-        align = "center",
-        valign = "middle",
-        bg = BG_COLOR,
     })
-    display.present()
+    screen:present()
 end
 
 local function inside_clear_button(x, y)
@@ -102,11 +91,11 @@ local function inside_exit_button(x, y)
 end
 
 local function stamp_brush(x, y)
-    display.fill_circle(x, y, BRUSH_R, INK_COLOR)
-    display.present()
+    screen:begin()
+    screen:fill_circle(x, y, BRUSH_R, INK_COLOR)
+    screen:present()
 end
 
-display.begin_frame({ clear = true, color = BG_COLOR })
 draw_ui()
 
 print("[lcd_touch_paint] ready")
@@ -126,7 +115,7 @@ local run_ok, run_err = xpcall(function()
     local last_x, last_y = 0, 0
 
     while true do
-        local points = display.touch.read()
+        local points = screen:touch().points
         local point = active_id ~= nil and find_point(points, active_id) or nil
 
         if active_id == nil and points[1] ~= nil then
@@ -135,7 +124,6 @@ local run_ok, run_err = xpcall(function()
             if inside_exit_button(point.x, point.y) then
                 return
             elseif inside_clear_button(point.x, point.y) then
-                display.clear(BG_COLOR)
                 draw_ui()
             else
                 drawing = true

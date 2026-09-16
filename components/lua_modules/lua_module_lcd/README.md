@@ -1,6 +1,6 @@
 # Lua LCD
 
-This module describes how to correctly use `lcd` when writing Lua scripts.
+This optional module describes how to use `lcd` in builds that enable it. The provided ESP-S3 board configurations currently disable it. `display.open()` uses only the built-in screen managed by the display service and does not accept panel or IO handles created by `lcd`.
 
 `lcd` is a panel bring-up module. It can:
 - Initialize an SPI or QSPI LCD panel from Lua
@@ -12,7 +12,7 @@ This module describes how to correctly use `lcd` when writing Lua scripts.
 
 - Import it with `local lcd = require("lcd")`
 - Create a panel with `lcd.new(config)`
-- Use the returned `panel_handle`, `io_handle`, `width`, `height`, and `panel_if` with `display.init(...)`
+- The returned panel/io handles are not accepted by the display module.
 - Call `lcd.get_info(dev)` to inspect the created device
 - Call `lcd.reset(dev)` when the panel needs to be reinitialized
 - Call `lcd.delete(dev)` when finished
@@ -51,13 +51,12 @@ The current binding supports these `controller` names:
 - `io_handle`: lightuserdata for the panel IO
 - `width`: panel width
 - `height`: panel height
-- `panel_if`: panel interface constant for `display.init(...)`
+- `panel_if`: panel interface metadata
 
 ## Typical SPI example
 
 ```lua
 local lcd = require("lcd")
-local display = require("display")
 
 local dev, panel_handle, io_handle, width, height, panel_if = lcd.new({
     controller = "st7789",
@@ -90,7 +89,7 @@ local dev, panel_handle, io_handle, width, height, panel_if = lcd.new({
 local info = lcd.get_info(dev)
 print(info.controller, info.width, info.height, info.bus_mode)
 
-display.init(panel_handle, io_handle, width, height, panel_if)
+lcd.delete(dev)
 ```
 
 ## Config shape

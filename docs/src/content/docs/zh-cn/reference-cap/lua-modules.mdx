@@ -1,6 +1,6 @@
 ---
 title: Lua 扩展模块（lua_module_* / lua_driver_*）
-description: lua_module_* 与 lua_driver_* 组件的注册机制、实现方式，以及 display 模块的完整分析。
+description: lua_module_* 与 lua_driver_* 组件的注册机制、实现方式，以及 display 模块的所有权说明。
 ---
 
 import LinkToSource from '@/components/LinkToSource.astro';
@@ -50,7 +50,7 @@ import { LinkCard } from 'starlight-theme-nova/components'
 | `imu` | `lua_module_imu` | IMU 加速度计与陀螺仪数据读取 |
 | `ir` | `lua_module_ir` | 红外接收、学习与发送 |
 | `knob` | `lua_module_knob` | 旋钮/旋转编码器事件读取 |
-| `lcd` | `lua_module_lcd` | LCD 面板初始化、背光与显示辅助控制 |
+| `lcd` | `lua_module_lcd` | 可选的 LCD 面板初始化、复位与信息读取；不供 `display` 使用 |
 | `led_strip` | `lua_module_led_strip` | WS2812 等可寻址 LED 灯带控制 |
 | `lvgl` | `lua_module_lvgl` | LVGL 图形库绑定，支持完整 UI 控件与事件系统 |
 | `magnetometer` | `lua_module_magnetometer` | 磁力计/指南针数据读取 |
@@ -74,35 +74,22 @@ import { LinkCard } from 'starlight-theme-nova/components'
 esp_err_t lua_module_display_register(void);
 ```
 
-注册函数内部调用 `cap_lua_register_module`，将模块名与 `luaopen_*` 函数关联：
+注册函数将 Lua 模块名与对应的 `luaopen_*` 入口关联，也可以完成模块自身所需的初始化。`lua_module_display_register()` 还注册脚本退出时的清理函数。
 
-```c
-// lua_module_display/src/lua_module_display.c
-esp_err_t lua_module_display_register(void)
-{
-    return cap_lua_register_module("display", luaopen_display);
-}
-```
-
-**注意：所有模块必须在 `cap_lua_register_group()` 之前注册**，之后注册会被拒绝（运行时锁定）。
+**注意：必须在 Lua capability group 初始化前注册模块。** group 初始化时会锁定模块注册，之后注册会被拒绝。
 
 ### 应用层注册示例
 
 ```c
-// app_claw.c 或类似初始化文件
+// Minimal app registration example
 #include "lua_module_display.h"
-#include "lua_driver_gpio.h"
-#include "lua_module_delay.h"
 #include "cap_lua.h"
 
-void app_lua_modules_init(void)
+esp_err_t register_display_lua_capability(void)
 {
-    lua_module_display_register();
-    lua_driver_gpio_register();
-    lua_module_delay_register();
-    // ... 其他模块 ...
-
-    cap_lua_register_group("/fatfs/scripts");  // 传入脚本基目录，锁定后不能再注册模块
+    esp_err_t err = lua_module_display_register();
+    if (err != ESP_OK) return err;
+    return cap_lua_register_group();
 }
 ```
 
@@ -427,9 +414,9 @@ print("GPIO2 level:", level)
 
 显示模块有特殊的所有权管理逻辑（「仲裁」机制），确保 Lua 脚本可以独占使用显示资源，避免与其他任务冲突。
 
-`lua_module_display` 模块在 `display.init(...)` 成功后，Lua 会自动获取前台显示所有权；`display.deinit()` 或脚本结束清理时释放所有权，避免与其他显示任务冲突。
+`lua_module_display` 通过 `display.open(...)` 独占内置屏，返回 screen 对象；`screen:close()`、`<close>` 或脚本退出清理时释放所有权。绘制在 `screen:begin()` 与 `screen:present()` 之间完成，重复打开报错。
 
-另外，在显示 HAL 重新创建场景中，运行时会清理历史残留的 swap buffer / display callback 状态，减少跨脚本切换时的显示资源泄漏风险（特别是配合 `lua_run_script_async` 的 `exclusive:"display"` + `replace:true` 切换时）。
+长时间绘制的场景可通过 `lua_run_script_async` 的 `exclusive:"display"` 和 `replace:true` 停止上一个 display job，再启动新任务。
 
 ### `event_publisher` 向 Event Router 发布事件
 
