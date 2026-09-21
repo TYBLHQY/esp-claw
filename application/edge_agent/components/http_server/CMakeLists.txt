@@ -17,6 +17,7 @@ set(http_server_srcs
     "http_server_assets.c"
     "http_server_capabilities_api.c"
     "http_server_config_api.c"
+    "http_server_maintenance_api.c"
     "http_server_lua_modules_api.c"
     "http_server_status_api.c"
     "http_server_files_api.c"
@@ -32,6 +33,7 @@ set(http_server_requires
     cap_im_local
     claw_cap
     esp_http_server
+    esp_https_ota
     heap
 )
 

@@ -6,6 +6,7 @@ idf_component_register(
     REQUIRES
         claw_cap
         claw_core
+        claw_manager
         esp_netif
         esp_wifi
     PRIV_REQUIRES

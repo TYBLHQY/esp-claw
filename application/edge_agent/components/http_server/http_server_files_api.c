@@ -37,6 +37,7 @@ static int mkdir_parents(char *path, mode_t mode)
 
 static esp_err_t files_list_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     char relative_path[HTTP_SERVER_PATH_MAX] = "/";
     if (http_server_query_get(req, "path", relative_path, sizeof(relative_path)) != ESP_OK) {
         strlcpy(relative_path, "/", sizeof(relative_path));
@@ -101,6 +102,7 @@ static esp_err_t files_list_handler(httpd_req_t *req)
 
 static esp_err_t file_download_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     const char *relative_path = req->uri + strlen("/files");
     if (!http_server_path_is_safe(relative_path)) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid path");
@@ -162,6 +164,7 @@ static esp_err_t file_download_handler(httpd_req_t *req)
 
 static esp_err_t files_upload_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     char relative_path[HTTP_SERVER_PATH_MAX] = {0};
     if (http_server_query_get(req, "path", relative_path, sizeof(relative_path)) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing path");
@@ -248,6 +251,7 @@ static int rmdir_recursive(const char *path)
 
 static esp_err_t files_delete_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     char relative_path[HTTP_SERVER_PATH_MAX] = {0};
     if (http_server_query_get(req, "path", relative_path, sizeof(relative_path)) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing path");
@@ -308,6 +312,7 @@ static esp_err_t files_delete_handler(httpd_req_t *req)
 
 static esp_err_t files_mkdir_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     cJSON *root = NULL;
     if (http_server_parse_json_body(req, &root) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON body");

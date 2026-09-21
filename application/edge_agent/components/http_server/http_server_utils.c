@@ -10,6 +10,53 @@
 
 #include "esp_heap_caps.h"
 
+bool http_server_require_auth(httpd_req_t *req)
+{
+    http_server_ctx_t *ctx = http_server_ctx();
+    app_config_t *config = NULL;
+    char header[APP_CONFIG_STR_LEN + 16] = {0};
+    const char prefix[] = "Bearer ";
+    size_t header_len;
+
+    if (!req || !ctx->services.load_config) {
+        return false;
+    }
+
+    /* app_config_t is large enough that keeping it on the httpd task stack
+     * can overflow when called by handlers that also load a config. */
+    config = calloc(1, sizeof(*config));
+    if (!config || ctx->services.load_config(config) != ESP_OK) {
+        free(config);
+        return false;
+    }
+    if (!config->ap_password[0]) {
+        free(config);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "Set an AP password before using the protected Web UI.");
+        return false;
+    }
+    header_len = httpd_req_get_hdr_value_len(req, "Authorization");
+    if (header_len > 0 && header_len < sizeof(header) &&
+            httpd_req_get_hdr_value_str(req, "Authorization", header, sizeof(header)) == ESP_OK &&
+            strncmp(header, prefix, sizeof(prefix) - 1) == 0 &&
+            strcmp(header + sizeof(prefix) - 1, config->ap_password) == 0) {
+        free(config);
+        return true;
+    }
+    if (http_server_query_get(req, "token", header, sizeof(header)) == ESP_OK &&
+            strcmp(header, config->ap_password) == 0) {
+        free(config);
+        return true;
+    }
+    free(config);
+    {
+        httpd_resp_set_status(req, "401 Unauthorized");
+        httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer");
+        httpd_resp_sendstr(req, "Unauthorized");
+        return false;
+    }
+}
+
 char *http_server_alloc_scratch_buffer(void)
 {
     return heap_caps_malloc_prefer(HTTP_SERVER_SCRATCH_SIZE,

@@ -41,6 +41,8 @@ static const char *TAG = "cap_im_qq";
 #define CAP_IM_QQ_WS_CONNECT_GRACE_MS  10000
 #define CAP_IM_QQ_RECONNECT_DELAY_MS   5000
 #define CAP_IM_QQ_MAX_MSG_LEN          1500
+#define CAP_IM_QQ_MAX_REPLY_CHUNKS     4
+#define CAP_IM_QQ_CHUNK_DELAY_MS       250
 #define CAP_IM_QQ_HTTP_RESP_INIT       2048
 #define CAP_IM_QQ_WS_TASK_STACK        6144
 #define CAP_IM_QQ_WS_CLIENT_STACK      8192
@@ -62,6 +64,8 @@ static const char *TAG = "cap_im_qq";
 
 #define CAP_IM_QQ_INTENTS ((1 << 30) | (1 << 25))
 #define CAP_IM_QQ_FILE_TYPE_IMAGE 1
+#define CAP_IM_QQ_FILE_TYPE_VIDEO 2
+#define CAP_IM_QQ_FILE_TYPE_AUDIO 3
 #define CAP_IM_QQ_FILE_TYPE_FILE  4
 
 typedef struct {
@@ -955,7 +959,9 @@ static void cap_im_qq_handle_attachments(cJSON *attachments,
         if (cap_im_qq_is_image_mime(mime)) {
             kind = "image";
         } else if (cap_im_qq_is_audio_mime(mime)) {
-            kind = "file";
+            kind = "audio";
+        } else if (mime && strncmp(mime, "video/", 6) == 0) {
+            kind = "video";
         }
 
         {
@@ -1590,6 +1596,14 @@ retry:
         if (attempt == 0 && cap_im_qq_is_token_invalid_response(resp.buf)) {
             cap_im_qq_invalidate_token();
             free(resp.buf);
+            attempt++;
+            goto retry;
+        }
+        if ((status == 429 || status == 500 || status == 502 ||
+                status == 503 || status == 504) && attempt < 2) {
+            uint32_t delay_ms = status == 429 ? 1000U : 500U * (uint32_t)(attempt + 1);
+            free(resp.buf);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
             attempt++;
             goto retry;
         }
@@ -2573,6 +2587,24 @@ static esp_err_t cap_im_qq_send_file_execute(const char *input_json,
                                         "file");
 }
 
+static esp_err_t cap_im_qq_send_video_execute(const char *input_json,
+                                              const claw_cap_call_context_t *ctx,
+                                              char *output,
+                                              size_t output_size)
+{
+    return cap_im_qq_send_media_execute(input_json, ctx, output, output_size,
+                                        CAP_IM_QQ_FILE_TYPE_VIDEO, "video");
+}
+
+static esp_err_t cap_im_qq_send_audio_execute(const char *input_json,
+                                              const claw_cap_call_context_t *ctx,
+                                              char *output,
+                                              size_t output_size)
+{
+    return cap_im_qq_send_media_execute(input_json, ctx, output, output_size,
+                                        CAP_IM_QQ_FILE_TYPE_AUDIO, "audio");
+}
+
 static esp_err_t cap_im_qq_resolve_group_chat(const cJSON *root,
                                               const claw_cap_call_context_t *ctx,
                                               char *chat_id,
@@ -2804,6 +2836,28 @@ static const claw_cap_descriptor_t s_qq_descriptors[] = {
         .execute = cap_im_qq_send_file_execute,
     },
     {
+        .id = "qq_send_video",
+        .name = "qq_send_video",
+        .family = "im",
+        .description = "Send a video file from a local path to a QQ chat.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json =
+        "{\"type\":\"object\",\"properties\":{\"chat_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"caption\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
+        .execute = cap_im_qq_send_video_execute,
+    },
+    {
+        .id = "qq_send_audio",
+        .name = "qq_send_audio",
+        .family = "im",
+        .description = "Send an audio or voice file from a local path to a QQ chat.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json =
+        "{\"type\":\"object\",\"properties\":{\"chat_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"caption\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
+        .execute = cap_im_qq_send_audio_execute,
+    },
+    {
         .id = "qq_get_group_info",
         .name = "qq_get_group_info",
         .family = "im",
@@ -2933,6 +2987,7 @@ esp_err_t cap_im_qq_send_text(const char *chat_id, const char *text)
 
     size_t text_len;
     size_t offset = 0;
+    size_t chunk_count = 0;
     esp_err_t last_err = ESP_OK;
 
     if (!chat_id || !text || text[0] == '\0') {
@@ -2958,6 +3013,10 @@ esp_err_t cap_im_qq_send_text(const char *chat_id, const char *text)
 
     text_len = strlen(send_text);
     while (offset < text_len) {
+        if (chunk_count >= CAP_IM_QQ_MAX_REPLY_CHUNKS) {
+            ESP_LOGW(TAG, "QQ text reply truncated after %d chunks", CAP_IM_QQ_MAX_REPLY_CHUNKS);
+            break;
+        }
         size_t chunk_len = text_len - offset;
         char *chunk = NULL;
         esp_err_t err;
@@ -2988,6 +3047,10 @@ esp_err_t cap_im_qq_send_text(const char *chat_id, const char *text)
         }
 
         offset += chunk_len;
+        chunk_count++;
+        if (offset < text_len) {
+            vTaskDelay(pdMS_TO_TICKS(CAP_IM_QQ_CHUNK_DELAY_MS));
+        }
     }
 
     free(cleaned_text);
@@ -3017,4 +3080,20 @@ esp_err_t cap_im_qq_send_file(const char *chat_id, const char *path, const char 
                                 caption,
                                 CAP_IM_QQ_FILE_TYPE_FILE,
                                 "file");
+}
+
+esp_err_t cap_im_qq_send_video(const char *chat_id, const char *path, const char *caption)
+{
+    if (!s_qq_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return cap_im_qq_send_media(chat_id, path, caption, CAP_IM_QQ_FILE_TYPE_VIDEO, "video");
+}
+
+esp_err_t cap_im_qq_send_audio(const char *chat_id, const char *path, const char *caption)
+{
+    if (!s_qq_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return cap_im_qq_send_media(chat_id, path, caption, CAP_IM_QQ_FILE_TYPE_AUDIO, "audio");
 }
