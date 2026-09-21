@@ -29,6 +29,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mbedtls/base64.h"
 
@@ -46,6 +47,7 @@ static const char *TAG = "cap_im_qq";
 #define CAP_IM_QQ_WS_PRIO              5
 #define CAP_IM_QQ_INBOUND_QUEUE_LEN    32
 #define CAP_IM_QQ_DEDUP_CACHE_SIZE     64
+#define CAP_IM_QQ_LAST_MESSAGE_CACHE_SIZE 8
 #define CAP_IM_QQ_PATH_BUF_SIZE        256
 #define CAP_IM_QQ_NAME_BUF_SIZE        96
 
@@ -88,6 +90,11 @@ typedef struct {
 } cap_im_qq_ws_assembly_t;
 
 typedef struct {
+    char chat_id[CAP_IM_QQ_NAME_BUF_SIZE];
+    char message_id[CAP_IM_QQ_NAME_BUF_SIZE];
+} cap_im_qq_last_message_t;
+
+typedef struct {
     char app_id[64];
     char app_secret[128];
     char access_token[512];
@@ -114,6 +121,9 @@ typedef struct {
     cap_im_qq_ws_assembly_t ws_assembly;
     uint64_t seen_msg_keys[CAP_IM_QQ_DEDUP_CACHE_SIZE];
     size_t seen_msg_idx;
+    cap_im_qq_last_message_t last_messages[CAP_IM_QQ_LAST_MESSAGE_CACHE_SIZE];
+    size_t last_message_idx;
+    SemaphoreHandle_t last_message_lock;
 } cap_im_qq_state_t;
 
 static EXT_RAM_BSS_ATTR cap_im_qq_state_t s_qq;
@@ -128,6 +138,7 @@ static void cap_im_qq_init_defaults(void)
     s_qq.heartbeat_interval_ms = 30000;
     s_qq.last_seq = -1;
     s_qq.msg_type = 0;
+    s_qq.last_message_lock = xSemaphoreCreateMutex();
     s_qq_initialized = true;
 }
 
@@ -166,6 +177,76 @@ static bool cap_im_qq_dedup_check_and_record(const char *message_id)
     s_qq.seen_msg_keys[s_qq.seen_msg_idx] = key;
     s_qq.seen_msg_idx = (s_qq.seen_msg_idx + 1) % CAP_IM_QQ_DEDUP_CACHE_SIZE;
     return false;
+}
+
+static void cap_im_qq_record_last_message(const char *chat_id, const char *response)
+{
+    cJSON *root = NULL;
+    cJSON *id_json = NULL;
+    cap_im_qq_last_message_t *slot = NULL;
+    size_t i;
+
+    if (!chat_id || !chat_id[0] || !response || !response[0] ||
+            !s_qq.last_message_lock) {
+        return;
+    }
+
+    root = cJSON_Parse(response);
+    if (!root) {
+        return;
+    }
+    id_json = cJSON_GetObjectItem(root, "id");
+    if (!cJSON_IsString(id_json) || !id_json->valuestring || !id_json->valuestring[0]) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (xSemaphoreTake(s_qq.last_message_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    for (i = 0; i < CAP_IM_QQ_LAST_MESSAGE_CACHE_SIZE; i++) {
+        if (strcmp(s_qq.last_messages[i].chat_id, chat_id) == 0) {
+            slot = &s_qq.last_messages[i];
+            break;
+        }
+    }
+    if (!slot) {
+        slot = &s_qq.last_messages[s_qq.last_message_idx];
+        s_qq.last_message_idx =
+            (s_qq.last_message_idx + 1) % CAP_IM_QQ_LAST_MESSAGE_CACHE_SIZE;
+    }
+    strlcpy(slot->chat_id, chat_id, sizeof(slot->chat_id));
+    strlcpy(slot->message_id, id_json->valuestring, sizeof(slot->message_id));
+    xSemaphoreGive(s_qq.last_message_lock);
+    cJSON_Delete(root);
+}
+
+static esp_err_t cap_im_qq_get_last_message(const char *chat_id,
+                                            char *message_id,
+                                            size_t message_id_size)
+{
+    size_t i;
+
+    if (!chat_id || !chat_id[0] || !message_id || message_id_size == 0 ||
+            !s_qq.last_message_lock) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    message_id[0] = '\0';
+    if (xSemaphoreTake(s_qq.last_message_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    for (i = 0; i < CAP_IM_QQ_LAST_MESSAGE_CACHE_SIZE; i++) {
+        if (strcmp(s_qq.last_messages[i].chat_id, chat_id) == 0) {
+            strlcpy(message_id, s_qq.last_messages[i].message_id, message_id_size);
+            break;
+        }
+    }
+    xSemaphoreGive(s_qq.last_message_lock);
+
+    return message_id[0] ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
 static const char *cap_im_qq_basename(const char *path)
@@ -1647,6 +1728,7 @@ static esp_err_t cap_im_qq_send_media_message(const char *chat_id,
     cJSON *media = NULL;
     char *json_str = NULL;
     char *path = NULL;
+    char *response = NULL;
     esp_err_t err;
 
     if (!chat_id || !file_info || !file_info[0]) {
@@ -1681,7 +1763,11 @@ static esp_err_t cap_im_qq_send_media_message(const char *chat_id,
         return ESP_ERR_INVALID_ARG;
     }
 
-    err = cap_im_qq_api_post(path, json_str, NULL);
+    err = cap_im_qq_api_post(path, json_str, &response);
+    if (err == ESP_OK) {
+        cap_im_qq_record_last_message(chat_id, response);
+    }
+    free(response);
     free(path);
     free(json_str);
     return err;
@@ -2063,6 +2149,7 @@ static esp_err_t cap_im_qq_send_message_chunk(const char *chat_id,
     cJSON *body = cJSON_CreateObject();
     char *json_str = NULL;
     char *path = NULL;
+    char *response = NULL;
     esp_err_t err;
 
     if (!body) {
@@ -2102,7 +2189,11 @@ static esp_err_t cap_im_qq_send_message_chunk(const char *chat_id,
         return ESP_ERR_INVALID_ARG;
     }
 
-    err = cap_im_qq_api_post(path, json_str, NULL);
+    err = cap_im_qq_api_post(path, json_str, &response);
+    if (err == ESP_OK) {
+        cap_im_qq_record_last_message(chat_id, response);
+    }
+    free(response);
     free(json_str);
     free(path);
     return err;
@@ -2482,6 +2573,189 @@ static esp_err_t cap_im_qq_send_file_execute(const char *input_json,
                                         "file");
 }
 
+static esp_err_t cap_im_qq_resolve_group_chat(const cJSON *root,
+                                              const claw_cap_call_context_t *ctx,
+                                              char *chat_id,
+                                              size_t chat_id_size,
+                                              char *group_openid,
+                                              size_t group_openid_size)
+{
+    cJSON *chat_id_json = root ? cJSON_GetObjectItem(root, "chat_id") : NULL;
+    cJSON *group_json = root ? cJSON_GetObjectItem(root, "group_openid") : NULL;
+    const char *candidate = NULL;
+
+    if (cJSON_IsString(chat_id_json) && chat_id_json->valuestring &&
+            chat_id_json->valuestring[0]) {
+        candidate = chat_id_json->valuestring;
+    } else if (ctx && ctx->chat_id && ctx->chat_id[0]) {
+        candidate = ctx->chat_id;
+    }
+
+    if (cJSON_IsString(group_json) && group_json->valuestring &&
+            group_json->valuestring[0]) {
+        snprintf(chat_id, chat_id_size, "group:%s", group_json->valuestring);
+        strlcpy(group_openid, group_json->valuestring, group_openid_size);
+    } else if (candidate && strncmp(candidate, "group:", 6) == 0 && candidate[6]) {
+        strlcpy(chat_id, candidate, chat_id_size);
+        strlcpy(group_openid, candidate + 6, group_openid_size);
+    } else {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t cap_im_qq_group_query_execute(const char *input_json,
+                                               const claw_cap_call_context_t *ctx,
+                                               char *output,
+                                               size_t output_size,
+                                               const char *resource,
+                                               const char *label)
+{
+    cJSON *root = NULL;
+    char chat_id[CAP_IM_QQ_NAME_BUF_SIZE] = {0};
+    char group_openid[CAP_IM_QQ_NAME_BUF_SIZE] = {0};
+    char path[CAP_IM_QQ_PATH_BUF_SIZE];
+    char *response = NULL;
+    esp_err_t err;
+
+    root = cJSON_Parse(input_json ? input_json : "{}");
+    if (!root) {
+        snprintf(output, output_size, "Error: invalid JSON");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    err = cap_im_qq_resolve_group_chat(root,
+                                       ctx,
+                                       chat_id,
+                                       sizeof(chat_id),
+                                       group_openid,
+                                       sizeof(group_openid));
+    cJSON_Delete(root);
+    if (err != ESP_OK) {
+        snprintf(output,
+                 output_size,
+                 "Error: group_openid or a group chat context is required");
+        return err;
+    }
+
+    snprintf(path, sizeof(path), "/v2/groups/%s/%s", group_openid, resource);
+    err = cap_im_qq_api_request(HTTP_METHOD_GET, path, NULL, &response);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "QQ %s failed for %s: %s", label, chat_id, esp_err_to_name(err));
+        snprintf(output, output_size, "Error: %s", esp_err_to_name(err));
+        free(response);
+        return err;
+    }
+
+    snprintf(output, output_size, "%s", response ? response : "{}");
+    free(response);
+    return ESP_OK;
+}
+
+static esp_err_t cap_im_qq_group_info_execute(const char *input_json,
+                                              const claw_cap_call_context_t *ctx,
+                                              char *output,
+                                              size_t output_size)
+{
+    return cap_im_qq_group_query_execute(input_json,
+                                         ctx,
+                                         output,
+                                         output_size,
+                                         "info",
+                                         "group info query");
+}
+
+static esp_err_t cap_im_qq_bot_state_execute(const char *input_json,
+                                             const claw_cap_call_context_t *ctx,
+                                             char *output,
+                                             size_t output_size)
+{
+    return cap_im_qq_group_query_execute(input_json,
+                                         ctx,
+                                         output,
+                                         output_size,
+                                         "bot_state",
+                                         "bot state query");
+}
+
+static esp_err_t cap_im_qq_recall_execute(const char *input_json,
+                                          const claw_cap_call_context_t *ctx,
+                                          char *output,
+                                          size_t output_size)
+{
+    cJSON *root = NULL;
+    cJSON *chat_id_json;
+    cJSON *message_id_json;
+    const char *chat_id = NULL;
+    const char *message_id = NULL;
+    char resolved_message_id[CAP_IM_QQ_NAME_BUF_SIZE] = {0};
+    char suffix[CAP_IM_QQ_NAME_BUF_SIZE + 16];
+    char *path = NULL;
+    esp_err_t err;
+
+    root = cJSON_Parse(input_json ? input_json : "{}");
+    if (!root) {
+        snprintf(output, output_size, "Error: invalid JSON");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    chat_id_json = cJSON_GetObjectItem(root, "chat_id");
+    message_id_json = cJSON_GetObjectItem(root, "message_id");
+    if (cJSON_IsString(chat_id_json) && chat_id_json->valuestring &&
+            chat_id_json->valuestring[0]) {
+        chat_id = chat_id_json->valuestring;
+    } else if (ctx && ctx->chat_id && ctx->chat_id[0]) {
+        chat_id = ctx->chat_id;
+    }
+    if (cJSON_IsString(message_id_json) && message_id_json->valuestring &&
+            message_id_json->valuestring[0]) {
+        message_id = message_id_json->valuestring;
+    }
+
+    if (!chat_id || (strncmp(chat_id, "c2c:", 4) != 0 &&
+                     strncmp(chat_id, "group:", 6) != 0)) {
+        cJSON_Delete(root);
+        snprintf(output, output_size, "Error: a c2c:<openid> or group:<openid> chat_id is required");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!message_id) {
+        if (cap_im_qq_get_last_message(chat_id,
+                                       resolved_message_id,
+                                       sizeof(resolved_message_id)) != ESP_OK) {
+            cJSON_Delete(root);
+            snprintf(output, output_size, "Error: no recent QQ message is available to recall");
+            return ESP_ERR_NOT_FOUND;
+        }
+        message_id = resolved_message_id;
+    }
+    if (!message_id[0] || strchr(message_id, '/') || strchr(message_id, '?')) {
+        cJSON_Delete(root);
+        snprintf(output, output_size, "Error: invalid message_id");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    strlcpy(resolved_message_id, message_id, sizeof(resolved_message_id));
+    message_id = resolved_message_id;
+    snprintf(suffix, sizeof(suffix), "messages/%s", message_id);
+    path = cap_im_qq_build_chat_path(chat_id, suffix);
+    cJSON_Delete(root);
+    if (!path) {
+        snprintf(output, output_size, "Error: invalid chat_id");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    err = cap_im_qq_api_request(HTTP_METHOD_DELETE, path, NULL, NULL);
+    free(path);
+    if (err != ESP_OK) {
+        snprintf(output, output_size, "Error: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    snprintf(output, output_size, "QQ message recalled: %s", message_id);
+    return ESP_OK;
+}
+
 static const claw_cap_descriptor_t s_qq_descriptors[] = {
     {
         .id = "qq_gateway",
@@ -2528,6 +2802,39 @@ static const claw_cap_descriptor_t s_qq_descriptors[] = {
         .input_schema_json =
         "{\"type\":\"object\",\"properties\":{\"chat_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"caption\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
         .execute = cap_im_qq_send_file_execute,
+    },
+    {
+        .id = "qq_get_group_info",
+        .name = "qq_get_group_info",
+        .family = "im",
+        .description = "Query QQ group name, description, tags, and member count.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json =
+        "{\"type\":\"object\",\"properties\":{\"group_openid\":{\"type\":\"string\"},\"chat_id\":{\"type\":\"string\"}}}",
+        .execute = cap_im_qq_group_info_execute,
+    },
+    {
+        .id = "qq_get_bot_state",
+        .name = "qq_get_bot_state",
+        .family = "im",
+        .description = "Query the QQ bot's role, message receive mode, and proactive push state in a group.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json =
+        "{\"type\":\"object\",\"properties\":{\"group_openid\":{\"type\":\"string\"},\"chat_id\":{\"type\":\"string\"}}}",
+        .execute = cap_im_qq_bot_state_execute,
+    },
+    {
+        .id = "qq_recall_message",
+        .name = "qq_recall_message",
+        .family = "im",
+        .description = "Recall the bot's most recent QQ message in the current chat, or a specific message_id. QQ time and permission limits apply.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json =
+        "{\"type\":\"object\",\"properties\":{\"chat_id\":{\"type\":\"string\"},\"message_id\":{\"type\":\"string\"}}}",
+        .execute = cap_im_qq_recall_execute,
     },
 };
 

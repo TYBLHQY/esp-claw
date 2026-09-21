@@ -48,6 +48,7 @@ For Feishu, QQ, and Telegram, pass explicit `chat_id` when starting a new outbou
 - If the send tool returns an error, report the error directly. Do not retry or switch channels unless the user asks.
 - If a capability returns success text or JSON such as `{"ok":true}`, tell the user the message or file has already been sent; do not phrase it as pending.
 - QQ generic file delivery may still depend on QQ platform-side support. If `qq_send_file` fails, report the failure clearly and only consider image send when the file is actually an image.
+- QQ management tools are available when the user asks about the current group or a recent bot message: `qq_get_group_info`, `qq_get_bot_state`, and `qq_recall_message`. The group query tools may omit their id when the current context is a QQ group. `qq_recall_message` without `message_id` targets the most recent message sent by the bot in that chat; QQ time and permission limits still apply.
 
 ## Workflow
 
