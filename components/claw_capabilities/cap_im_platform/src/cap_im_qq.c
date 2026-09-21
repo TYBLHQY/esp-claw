@@ -970,10 +970,31 @@ static void cap_im_qq_handle_all_media(cJSON *data,
     }
 }
 
-static bool cap_im_qq_group_content_mentions_bot(const char *content)
+static bool cap_im_qq_group_content_mentions_bot(const char *content, cJSON *data)
 {
     char mention[160];
     int needed;
+    cJSON *mentions;
+    cJSON *item;
+
+    if (s_qq.bot_openid[0] && cJSON_IsObject(data)) {
+        mentions = cJSON_GetObjectItem(data, "mentions");
+        if (cJSON_IsArray(mentions)) {
+            cJSON_ArrayForEach(item, mentions) {
+                cJSON *is_you = cJSON_GetObjectItem(item, "is_you");
+                cJSON *id_json = cJSON_GetObjectItem(item, "id");
+                cJSON *member_json = cJSON_GetObjectItem(item, "member_openid");
+
+                if (cJSON_IsTrue(is_you) ||
+                        (cJSON_IsString(id_json) && id_json->valuestring &&
+                         strcmp(id_json->valuestring, s_qq.bot_openid) == 0) ||
+                        (cJSON_IsString(member_json) && member_json->valuestring &&
+                         strcmp(member_json->valuestring, s_qq.bot_openid) == 0)) {
+                    return true;
+                }
+            }
+        }
+    }
 
     if (!content || !content[0]) {
         return false;
@@ -1187,8 +1208,12 @@ static void cap_im_qq_handle_dispatch(cJSON *data, const char *event_type)
         return;
     }
 
-    if (is_group && !is_group_at && !cap_im_qq_group_content_mentions_bot(content)) {
-        ESP_LOGD(TAG, "Ignoring QQ group message without bot mention: %s", chat_id);
+    if (is_group && !is_group_at && !cap_im_qq_group_content_mentions_bot(content, data)) {
+        ESP_LOGI(TAG,
+                 "Ignoring QQ group message without bot mention: type=%s chat=%s content=%.80s",
+                 event_type,
+                 chat_id,
+                 content ? content : "");
         return;
     }
 
@@ -1293,6 +1318,9 @@ static void cap_im_qq_process_frame(const char *frame, size_t frame_len)
         s_qq.ws_connected = true;
         break;
     case CAP_IM_QQ_WS_OP_DISPATCH:
+        if (dispatch_type[0] && strncmp(dispatch_type, "GROUP_", 6) == 0) {
+            ESP_LOGI(TAG, "QQ group dispatch received: type=%s", dispatch_type);
+        }
         if (strcmp(dispatch_type, "READY") == 0) {
             if (cJSON_IsObject(data_json)) {
                 cJSON *session_json = cJSON_GetObjectItem(data_json, "session_id");
