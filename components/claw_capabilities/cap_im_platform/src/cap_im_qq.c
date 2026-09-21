@@ -954,7 +954,13 @@ static void cap_im_qq_handle_dispatch(cJSON *data, const char *event_type)
         strlcpy(sender_id, openid->valuestring, sizeof(sender_id));
         content = cJSON_IsString(content_json) ? content_json->valuestring : "";
         message_id = id_json->valuestring;
-    } else if (strcmp(event_type, "GROUP_AT_MESSAGE_CREATE") == 0) {
+    } else if (strcmp(event_type, "GROUP_AT_MESSAGE_CREATE") == 0 ||
+               strcmp(event_type, "GROUP_MESSAGE_CREATE") == 0) {
+        /*
+         * QQ may deliver an @ mention as GROUP_MESSAGE_CREATE when the bot is
+         * allowed to receive all group messages.  Both event types use the
+         * same payload shape, so route them through the same group handler.
+         */
         cJSON *group = cJSON_GetObjectItem(data, "group_openid");
         cJSON *author = cJSON_GetObjectItem(data, "author");
         cJSON *member = author ? cJSON_GetObjectItem(author, "member_openid") : NULL;
