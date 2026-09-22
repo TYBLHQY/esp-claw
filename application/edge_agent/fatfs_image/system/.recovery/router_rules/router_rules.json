@@ -90,6 +90,36 @@
     ]
   },
   {
+    "id": "im_control_command",
+    "description": "Handle lightweight IM control commands without invoking the LLM.",
+    "enabled": true,
+    "consume_on_match": true,
+    "ack": "{{event.source_channel}} control command handled",
+    "match": {
+      "event_type": "message",
+      "event_key": "text",
+      "content_type": "text",
+      "text": "/",
+      "text_match_rule": "prefix"
+    },
+    "actions": [
+      {
+        "type": "call_cap",
+        "cap": "im_control_command",
+        "input": {
+          "command": "{{event.text}}"
+        }
+      },
+      {
+        "type": "send_message",
+        "input": {
+          "channel": "{{event.source_channel}}",
+          "chat_id": "{{event.chat_id}}"
+        }
+      }
+    ]
+  },
+  {
     "id": "im_any_message_working_reply",
     "description": "Reply to any IM text message before other automation handling.",
     "enabled": true,

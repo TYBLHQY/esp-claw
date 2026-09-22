@@ -29,6 +29,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mbedtls/base64.h"
 
@@ -40,18 +41,22 @@ static const char *TAG = "cap_im_qq";
 #define CAP_IM_QQ_WS_CONNECT_GRACE_MS  10000
 #define CAP_IM_QQ_RECONNECT_DELAY_MS   5000
 #define CAP_IM_QQ_MAX_MSG_LEN          1500
+#define CAP_IM_QQ_MAX_REPLY_CHUNKS     4
+#define CAP_IM_QQ_CHUNK_DELAY_MS       250
 #define CAP_IM_QQ_HTTP_RESP_INIT       2048
 #define CAP_IM_QQ_WS_TASK_STACK        6144
 #define CAP_IM_QQ_WS_CLIENT_STACK      8192
 #define CAP_IM_QQ_WS_PRIO              5
-#define CAP_IM_QQ_INBOUND_QUEUE_LEN    8
+#define CAP_IM_QQ_INBOUND_QUEUE_LEN    32
 #define CAP_IM_QQ_DEDUP_CACHE_SIZE     64
+#define CAP_IM_QQ_LAST_MESSAGE_CACHE_SIZE 8
 #define CAP_IM_QQ_PATH_BUF_SIZE        256
 #define CAP_IM_QQ_NAME_BUF_SIZE        96
 
 #define CAP_IM_QQ_WS_OP_DISPATCH        0
 #define CAP_IM_QQ_WS_OP_HEARTBEAT       1
 #define CAP_IM_QQ_WS_OP_IDENTIFY        2
+#define CAP_IM_QQ_WS_OP_RESUME          6
 #define CAP_IM_QQ_WS_OP_RECONNECT       7
 #define CAP_IM_QQ_WS_OP_INVALID_SESSION 9
 #define CAP_IM_QQ_WS_OP_HELLO           10
@@ -59,6 +64,8 @@ static const char *TAG = "cap_im_qq";
 
 #define CAP_IM_QQ_INTENTS ((1 << 30) | (1 << 25))
 #define CAP_IM_QQ_FILE_TYPE_IMAGE 1
+#define CAP_IM_QQ_FILE_TYPE_VIDEO 2
+#define CAP_IM_QQ_FILE_TYPE_AUDIO 3
 #define CAP_IM_QQ_FILE_TYPE_FILE  4
 
 typedef struct {
@@ -87,6 +94,11 @@ typedef struct {
 } cap_im_qq_ws_assembly_t;
 
 typedef struct {
+    char chat_id[CAP_IM_QQ_NAME_BUF_SIZE];
+    char message_id[CAP_IM_QQ_NAME_BUF_SIZE];
+} cap_im_qq_last_message_t;
+
+typedef struct {
     char app_id[64];
     char app_secret[128];
     char access_token[512];
@@ -95,6 +107,8 @@ typedef struct {
     bool enable_inbound_attachments;
     int64_t token_expire_time;
     char ws_url[384];
+    char session_id[128];
+    char bot_openid[128];
     esp_websocket_client_handle_t ws_client;
     TaskHandle_t ws_task;
     TaskHandle_t inbound_task;
@@ -103,12 +117,17 @@ typedef struct {
     volatile int last_seq;
     volatile bool ws_connected;
     volatile bool ws_identify_pending;
+    volatile bool ws_resume_pending;
     volatile bool ws_should_reconnect;
     volatile bool stop_requested;
+    volatile uint32_t dropped_frame_count;
     int msg_type;
     cap_im_qq_ws_assembly_t ws_assembly;
     uint64_t seen_msg_keys[CAP_IM_QQ_DEDUP_CACHE_SIZE];
     size_t seen_msg_idx;
+    cap_im_qq_last_message_t last_messages[CAP_IM_QQ_LAST_MESSAGE_CACHE_SIZE];
+    size_t last_message_idx;
+    SemaphoreHandle_t last_message_lock;
 } cap_im_qq_state_t;
 
 static EXT_RAM_BSS_ATTR cap_im_qq_state_t s_qq;
@@ -123,12 +142,8 @@ static void cap_im_qq_init_defaults(void)
     s_qq.heartbeat_interval_ms = 30000;
     s_qq.last_seq = -1;
     s_qq.msg_type = 0;
+    s_qq.last_message_lock = xSemaphoreCreateMutex();
     s_qq_initialized = true;
-}
-
-static int64_t cap_im_qq_now_ms(void)
-{
-    return esp_timer_get_time() / 1000LL;
 }
 
 static uint64_t cap_im_qq_fnv1a64(const char *text)
@@ -166,6 +181,76 @@ static bool cap_im_qq_dedup_check_and_record(const char *message_id)
     s_qq.seen_msg_keys[s_qq.seen_msg_idx] = key;
     s_qq.seen_msg_idx = (s_qq.seen_msg_idx + 1) % CAP_IM_QQ_DEDUP_CACHE_SIZE;
     return false;
+}
+
+static void cap_im_qq_record_last_message(const char *chat_id, const char *response)
+{
+    cJSON *root = NULL;
+    cJSON *id_json = NULL;
+    cap_im_qq_last_message_t *slot = NULL;
+    size_t i;
+
+    if (!chat_id || !chat_id[0] || !response || !response[0] ||
+            !s_qq.last_message_lock) {
+        return;
+    }
+
+    root = cJSON_Parse(response);
+    if (!root) {
+        return;
+    }
+    id_json = cJSON_GetObjectItem(root, "id");
+    if (!cJSON_IsString(id_json) || !id_json->valuestring || !id_json->valuestring[0]) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (xSemaphoreTake(s_qq.last_message_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    for (i = 0; i < CAP_IM_QQ_LAST_MESSAGE_CACHE_SIZE; i++) {
+        if (strcmp(s_qq.last_messages[i].chat_id, chat_id) == 0) {
+            slot = &s_qq.last_messages[i];
+            break;
+        }
+    }
+    if (!slot) {
+        slot = &s_qq.last_messages[s_qq.last_message_idx];
+        s_qq.last_message_idx =
+            (s_qq.last_message_idx + 1) % CAP_IM_QQ_LAST_MESSAGE_CACHE_SIZE;
+    }
+    strlcpy(slot->chat_id, chat_id, sizeof(slot->chat_id));
+    strlcpy(slot->message_id, id_json->valuestring, sizeof(slot->message_id));
+    xSemaphoreGive(s_qq.last_message_lock);
+    cJSON_Delete(root);
+}
+
+static esp_err_t cap_im_qq_get_last_message(const char *chat_id,
+                                            char *message_id,
+                                            size_t message_id_size)
+{
+    size_t i;
+
+    if (!chat_id || !chat_id[0] || !message_id || message_id_size == 0 ||
+            !s_qq.last_message_lock) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    message_id[0] = '\0';
+    if (xSemaphoreTake(s_qq.last_message_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    for (i = 0; i < CAP_IM_QQ_LAST_MESSAGE_CACHE_SIZE; i++) {
+        if (strcmp(s_qq.last_messages[i].chat_id, chat_id) == 0) {
+            strlcpy(message_id, s_qq.last_messages[i].message_id, message_id_size);
+            break;
+        }
+    }
+    xSemaphoreGive(s_qq.last_message_lock);
+
+    return message_id[0] ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
 static const char *cap_im_qq_basename(const char *path)
@@ -215,6 +300,12 @@ static esp_err_t cap_im_qq_queue_inbound_frame(const char *frame, size_t frame_l
     item.len = frame_len;
     if (xQueueSend(s_qq.inbound_queue, &item, 0) != pdTRUE) {
         free(item.frame);
+        s_qq.dropped_frame_count++;
+        if (s_qq.dropped_frame_count <= 3 || (s_qq.dropped_frame_count % 16) == 0) {
+            ESP_LOGW(TAG,
+                     "QQ inbound queue full, dropped=%" PRIu32,
+                     s_qq.dropped_frame_count);
+        }
         return ESP_ERR_NO_MEM;
     }
 
@@ -640,6 +731,49 @@ static esp_err_t cap_im_qq_ws_send_identify(void)
     return err;
 }
 
+static esp_err_t cap_im_qq_ws_send_resume(void)
+{
+    cJSON *root = NULL;
+    cJSON *data = NULL;
+    char *json_str = NULL;
+    char *auth = NULL;
+    esp_err_t err;
+
+    if (!s_qq.session_id[0] || s_qq.last_seq < 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    auth = cap_im_qq_make_auth_header();
+    if (!auth) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    root = cJSON_CreateObject();
+    data = cJSON_CreateObject();
+    if (!root || !data) {
+        free(auth);
+        cJSON_Delete(root);
+        cJSON_Delete(data);
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_AddNumberToObject(root, "op", CAP_IM_QQ_WS_OP_RESUME);
+    cJSON_AddStringToObject(data, "token", auth);
+    cJSON_AddStringToObject(data, "session_id", s_qq.session_id);
+    cJSON_AddNumberToObject(data, "seq", s_qq.last_seq);
+    cJSON_AddItemToObject(root, "d", data);
+    json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    free(auth);
+    if (!json_str) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    err = cap_im_qq_ws_send_json(json_str);
+    free(json_str);
+    return err;
+}
+
 static esp_err_t cap_im_qq_ws_send_heartbeat(void)
 {
     cJSON *root = cJSON_CreateObject();
@@ -685,33 +819,36 @@ static esp_err_t cap_im_qq_publish_inbound_text(const char *chat_id,
                                              message_id);
 }
 
-static esp_err_t cap_im_qq_publish_attachment_event(const char *chat_id,
-                                                    const char *sender_id,
-                                                    const char *message_id,
-                                                    const char *content_type,
-                                                    const char *payload_json)
+static void cap_im_qq_append_attachment_note(char *notes,
+                                              size_t notes_size,
+                                              const char *kind,
+                                              const char *path,
+                                              const char *mime)
 {
-    claw_event_t event = {0};
+    size_t used;
+    int written;
+    const char *analysis_hint = cap_im_qq_is_image_mime(mime) ?
+                                "；图片可调用 inspect_image 分析" : "";
 
-    if (!chat_id || !message_id || !content_type || !payload_json) {
-        return ESP_ERR_INVALID_ARG;
+    if (!notes || notes_size == 0 || !path || !path[0]) {
+        return;
     }
 
-    strlcpy(event.source_cap, "qq_gateway", sizeof(event.source_cap));
-    strlcpy(event.event_type, "attachment_saved", sizeof(event.event_type));
-    strlcpy(event.source_channel, "qq", sizeof(event.source_channel));
-    strlcpy(event.chat_id, chat_id, sizeof(event.chat_id));
-    if (sender_id && sender_id[0]) {
-        strlcpy(event.sender_id, sender_id, sizeof(event.sender_id));
+    used = strlen(notes);
+    if (used >= notes_size - 1) {
+        return;
     }
-    strlcpy(event.message_id, message_id, sizeof(event.message_id));
-    strlcpy(event.content_type, content_type, sizeof(event.content_type));
-    event.timestamp_ms = cap_im_qq_now_ms();
-    event.session_policy = CLAW_SESSION_POLICY_CHAT;
-    snprintf(event.event_id, sizeof(event.event_id), "qq-attach-%" PRId64, event.timestamp_ms);
-    event.text = "";
-    event.payload_json = (char *)payload_json;
-    return claw_event_router_publish(&event);
+
+    written = snprintf(notes + used,
+                       notes_size - used,
+                       "\n[QQ附件已保存: kind=%s path=%s mime=%s%s]",
+                       kind ? kind : "file",
+                       path,
+                       mime && mime[0] ? mime : "application/octet-stream",
+                       analysis_hint);
+    if (written < 0 || (size_t)written >= notes_size - used) {
+        notes[notes_size - 1] = '\0';
+    }
 }
 
 static esp_err_t cap_im_qq_save_attachment(const char *chat_id,
@@ -720,15 +857,15 @@ static esp_err_t cap_im_qq_save_attachment(const char *chat_id,
                                            const char *attachment_kind,
                                            const char *url,
                                            const char *original_filename,
-                                           const char *mime)
+                                           const char *mime,
+                                           char *notes,
+                                           size_t notes_size)
 {
     char normalized_url[512];
     char saved_dir[CAP_IM_QQ_PATH_BUF_SIZE];
     char saved_name[CAP_IM_QQ_NAME_BUF_SIZE];
     char saved_path[CAP_IM_QQ_PATH_BUF_SIZE];
     const char *extension = NULL;
-    const char *content_type = NULL;
-    char *payload_json = NULL;
     size_t bytes = 0;
     esp_err_t err;
 
@@ -767,42 +904,7 @@ static esp_err_t cap_im_qq_save_attachment(const char *chat_id,
         return err;
     }
 
-    content_type = cap_im_qq_is_image_mime(mime) ? "image" : "file";
-    payload_json = cap_im_attachment_build_payload_json(
-    &(cap_im_attachment_payload_config_t) {
-        .platform = "qq",
-        .attachment_kind = attachment_kind,
-        .saved_path = saved_path,
-        .saved_dir = saved_dir,
-        .saved_name = saved_name,
-        .original_filename = original_filename,
-        .mime = mime,
-        .caption = "",
-        .source_key = "attachment_url",
-        .source_value = normalized_url,
-        .size_bytes = bytes,
-        .saved_at_ms = cap_im_qq_now_ms(),
-    });
-    if (!payload_json) {
-        ESP_LOGW(TAG, "QQ attachment payload build failed: message=%s path=%s", message_id, saved_path);
-        ESP_LOGI(TAG, "Saved QQ %s to %s (%u bytes)", attachment_kind, saved_path, (unsigned int)bytes);
-        return ESP_OK;
-    }
-
-    err = cap_im_qq_publish_attachment_event(chat_id,
-                                             sender_id,
-                                             message_id,
-                                             content_type,
-                                             payload_json);
-    free(payload_json);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG,
-                 "QQ attachment publish event failed: message=%s path=%s err=%s",
-                 message_id,
-                 saved_path,
-                 esp_err_to_name(err));
-    }
-
+    cap_im_qq_append_attachment_note(notes, notes_size, attachment_kind, saved_path, mime);
     ESP_LOGI(TAG, "Saved QQ %s to %s (%u bytes)", attachment_kind, saved_path, (unsigned int)bytes);
     return ESP_OK;
 }
@@ -810,7 +912,9 @@ static esp_err_t cap_im_qq_save_attachment(const char *chat_id,
 static void cap_im_qq_handle_attachments(cJSON *attachments,
                                          const char *chat_id,
                                          const char *sender_id,
-                                         const char *message_id)
+                                         const char *message_id,
+                                         char *notes,
+                                         size_t notes_size)
 {
     cJSON *item = NULL;
 
@@ -855,7 +959,9 @@ static void cap_im_qq_handle_attachments(cJSON *attachments,
         if (cap_im_qq_is_image_mime(mime)) {
             kind = "image";
         } else if (cap_im_qq_is_audio_mime(mime)) {
-            kind = "file";
+            kind = "audio";
+        } else if (mime && strncmp(mime, "video/", 6) == 0) {
+            kind = "video";
         }
 
         {
@@ -865,7 +971,9 @@ static void cap_im_qq_handle_attachments(cJSON *attachments,
                                                       kind,
                                                       url,
                                                       filename,
-                                                      mime);
+                                                      mime,
+                                                      notes,
+                                                      notes_size);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG,
                          "Failed to save QQ attachment message=%s err=%s url=%s",
@@ -880,10 +988,17 @@ static void cap_im_qq_handle_attachments(cJSON *attachments,
 static void cap_im_qq_handle_attachment_field(cJSON *field,
                                               const char *chat_id,
                                               const char *sender_id,
-                                              const char *message_id)
+                                              const char *message_id,
+                                              char *notes,
+                                              size_t notes_size)
 {
     if (cJSON_IsArray(field)) {
-        cap_im_qq_handle_attachments(field, chat_id, sender_id, message_id);
+        cap_im_qq_handle_attachments(field,
+                                     chat_id,
+                                     sender_id,
+                                     message_id,
+                                     notes,
+                                     notes_size);
     } else if (cJSON_IsObject(field)) {
         cJSON *array = cJSON_CreateArray();
 
@@ -891,7 +1006,12 @@ static void cap_im_qq_handle_attachment_field(cJSON *field,
             return;
         }
         cJSON_AddItemReferenceToArray(array, field);
-        cap_im_qq_handle_attachments(array, chat_id, sender_id, message_id);
+        cap_im_qq_handle_attachments(array,
+                                     chat_id,
+                                     sender_id,
+                                     message_id,
+                                     notes,
+                                     notes_size);
         cJSON_Delete(array);
     }
 }
@@ -899,7 +1019,9 @@ static void cap_im_qq_handle_attachment_field(cJSON *field,
 static void cap_im_qq_handle_all_media(cJSON *data,
                                        const char *chat_id,
                                        const char *sender_id,
-                                       const char *message_id)
+                                       const char *message_id,
+                                       char *notes,
+                                       size_t notes_size)
 {
     static const char *const media_fields[] = {
         "attachments",
@@ -926,7 +1048,192 @@ static void cap_im_qq_handle_all_media(cJSON *data,
         if (!field) {
             continue;
         }
-        cap_im_qq_handle_attachment_field(field, chat_id, sender_id, message_id);
+        cap_im_qq_handle_attachment_field(field,
+                                          chat_id,
+                                          sender_id,
+                                          message_id,
+                                          notes,
+                                          notes_size);
+    }
+}
+
+static bool cap_im_qq_group_content_mentions_bot(const char *content, cJSON *data)
+{
+    char mention[160];
+    int needed;
+    cJSON *mentions;
+    cJSON *item;
+
+    if (s_qq.bot_openid[0] && cJSON_IsObject(data)) {
+        mentions = cJSON_GetObjectItem(data, "mentions");
+        if (cJSON_IsArray(mentions)) {
+            cJSON_ArrayForEach(item, mentions) {
+                cJSON *is_you = cJSON_GetObjectItem(item, "is_you");
+                cJSON *id_json = cJSON_GetObjectItem(item, "id");
+                cJSON *member_json = cJSON_GetObjectItem(item, "member_openid");
+
+                if (cJSON_IsTrue(is_you) ||
+                        (cJSON_IsString(id_json) && id_json->valuestring &&
+                         strcmp(id_json->valuestring, s_qq.bot_openid) == 0) ||
+                        (cJSON_IsString(member_json) && member_json->valuestring &&
+                         strcmp(member_json->valuestring, s_qq.bot_openid) == 0)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    if (!content || !content[0]) {
+        return false;
+    }
+    if (!s_qq.bot_openid[0]) {
+        return strstr(content, "<@") != NULL;
+    }
+
+    needed = snprintf(mention, sizeof(mention), "<@%s>", s_qq.bot_openid);
+    if (needed > 0 && (size_t)needed < sizeof(mention) && strstr(content, mention)) {
+        return true;
+    }
+    needed = snprintf(mention, sizeof(mention), "<@!%s>", s_qq.bot_openid);
+    return needed > 0 && (size_t)needed < sizeof(mention) && strstr(content, mention);
+}
+
+static char *cap_im_qq_strip_mentions(const char *content, bool strip_all_mentions)
+{
+    size_t input_len;
+    size_t out_len = 0;
+    size_t i = 0;
+    char *out;
+
+    if (!content) {
+        return strdup("");
+    }
+
+    input_len = strlen(content);
+    out = calloc(1, input_len + 1);
+    if (!out) {
+        return NULL;
+    }
+
+    while (i < input_len) {
+        if (strip_all_mentions && i + 2 < input_len &&
+                content[i] == '<' && content[i + 1] == '@') {
+            size_t end = i + 2;
+
+            while (end < input_len && content[end] != '>') {
+                end++;
+            }
+            if (end < input_len) {
+                i = end + 1;
+                while (i < input_len && isspace((unsigned char)content[i])) {
+                    i++;
+                }
+                continue;
+            }
+        }
+        out[out_len++] = content[i++];
+    }
+    out[out_len] = '\0';
+
+    while (out_len > 0 && isspace((unsigned char)out[out_len - 1])) {
+        out[--out_len] = '\0';
+    }
+    while (out[0] && isspace((unsigned char)out[0])) {
+        memmove(out, out + 1, strlen(out));
+    }
+    return out;
+}
+
+static esp_err_t cap_im_qq_api_request(esp_http_client_method_t method,
+                                       const char *path,
+                                       const char *body_json,
+                                       char **out_response);
+
+static void cap_im_qq_handle_interaction(cJSON *data)
+{
+    cJSON *id_json;
+    cJSON *group_json;
+    cJSON *member_json;
+    cJSON *user_json;
+    cJSON *data_json;
+    cJSON *resolved_json;
+    cJSON *button_data_json;
+    cJSON *button_id_json;
+    char chat_id[96] = {0};
+    char sender_id[96] = {0};
+    char path[192];
+    const char *interaction_id;
+    const char *button_data = NULL;
+    char *ack_body = NULL;
+    esp_err_t err;
+
+    if (!cJSON_IsObject(data)) {
+        return;
+    }
+
+    id_json = cJSON_GetObjectItem(data, "id");
+    group_json = cJSON_GetObjectItem(data, "group_openid");
+    member_json = cJSON_GetObjectItem(data, "group_member_openid");
+    user_json = cJSON_GetObjectItem(data, "user_openid");
+    if (!cJSON_IsString(id_json) || !id_json->valuestring) {
+        return;
+    }
+    interaction_id = id_json->valuestring;
+
+    if (cJSON_IsString(group_json) && group_json->valuestring) {
+        snprintf(chat_id, sizeof(chat_id), "group:%s", group_json->valuestring);
+        if (cJSON_IsString(member_json)) {
+            strlcpy(sender_id, member_json->valuestring, sizeof(sender_id));
+        }
+    } else if (cJSON_IsString(user_json) && user_json->valuestring) {
+        snprintf(chat_id, sizeof(chat_id), "c2c:%s", user_json->valuestring);
+        strlcpy(sender_id, user_json->valuestring, sizeof(sender_id));
+    } else {
+        return;
+    }
+
+    data_json = cJSON_GetObjectItem(data, "data");
+    resolved_json = data_json ? cJSON_GetObjectItem(data_json, "resolved") : NULL;
+    button_data_json = resolved_json ? cJSON_GetObjectItem(resolved_json, "button_data") : NULL;
+    button_id_json = resolved_json ? cJSON_GetObjectItem(resolved_json, "button_id") : NULL;
+    if (cJSON_IsString(button_data_json) && button_data_json->valuestring) {
+        button_data = button_data_json->valuestring;
+    } else if (cJSON_IsString(button_id_json) && button_id_json->valuestring) {
+        button_data = button_id_json->valuestring;
+    }
+    if (!button_data || !button_data[0]) {
+        return;
+    }
+
+    if (cap_im_qq_dedup_check_and_record(interaction_id)) {
+        return;
+    }
+
+    ack_body = strdup("{\"code\":0}");
+    if (!ack_body) {
+        return;
+    }
+    snprintf(path, sizeof(path), "/interactions/%s", interaction_id);
+    err = cap_im_qq_api_request(HTTP_METHOD_PUT, path, ack_body, NULL);
+    free(ack_body);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "QQ interaction ack failed id=%s err=%s",
+                 interaction_id,
+                 esp_err_to_name(err));
+    }
+
+    if (cap_im_qq_publish_inbound_text(chat_id,
+                                       sender_id,
+                                       interaction_id,
+                                       button_data) != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to publish QQ interaction: %s", interaction_id);
+    } else {
+        ESP_LOGI(TAG,
+                 "QQ interaction chat=%s data=%.64s%s",
+                 chat_id,
+                 button_data,
+                 strlen(button_data) > 64 ? "..." : "");
     }
 }
 
@@ -934,8 +1241,13 @@ static void cap_im_qq_handle_dispatch(cJSON *data, const char *event_type)
 {
     char chat_id[96] = {0};
     char sender_id[96] = {0};
+    char attachment_notes[1536] = {0};
+    char *normalized_content = NULL;
+    char *combined_content = NULL;
     const char *content = NULL;
     const char *message_id = NULL;
+    bool is_group = false;
+    bool is_group_at = false;
 
     if (!data || !event_type) {
         return;
@@ -954,7 +1266,13 @@ static void cap_im_qq_handle_dispatch(cJSON *data, const char *event_type)
         strlcpy(sender_id, openid->valuestring, sizeof(sender_id));
         content = cJSON_IsString(content_json) ? content_json->valuestring : "";
         message_id = id_json->valuestring;
-    } else if (strcmp(event_type, "GROUP_AT_MESSAGE_CREATE") == 0) {
+    } else if (strcmp(event_type, "GROUP_AT_MESSAGE_CREATE") == 0 ||
+               strcmp(event_type, "GROUP_MESSAGE_CREATE") == 0) {
+        /*
+         * QQ may deliver an @ mention as GROUP_MESSAGE_CREATE when the bot is
+         * allowed to receive all group messages.  Both event types use the
+         * same payload shape, so route them through the same group handler.
+         */
         cJSON *group = cJSON_GetObjectItem(data, "group_openid");
         cJSON *author = cJSON_GetObjectItem(data, "author");
         cJSON *member = author ? cJSON_GetObjectItem(author, "member_openid") : NULL;
@@ -970,8 +1288,19 @@ static void cap_im_qq_handle_dispatch(cJSON *data, const char *event_type)
         }
         content = cJSON_IsString(content_json) ? content_json->valuestring : "";
         message_id = id_json->valuestring;
+        is_group = true;
+        is_group_at = strcmp(event_type, "GROUP_AT_MESSAGE_CREATE") == 0;
     } else {
         ESP_LOGI(TAG, "QQ dispatch type %s is not handled", event_type);
+        return;
+    }
+
+    if (is_group && !is_group_at && !cap_im_qq_group_content_mentions_bot(content, data)) {
+        ESP_LOGI(TAG,
+                 "Ignoring QQ group message without bot mention: type=%s chat=%s content=%.80s",
+                 event_type,
+                 chat_id,
+                 content ? content : "");
         return;
     }
 
@@ -979,15 +1308,52 @@ static void cap_im_qq_handle_dispatch(cJSON *data, const char *event_type)
         return;
     }
 
-    cap_im_qq_handle_all_media(data, chat_id, sender_id, message_id);
+    cap_im_qq_handle_all_media(data,
+                               chat_id,
+                               sender_id,
+                               message_id,
+                               attachment_notes,
+                               sizeof(attachment_notes));
 
-    if (content && content[0]) {
-        if (cap_im_qq_publish_inbound_text(chat_id, sender_id, message_id, content) == ESP_OK) {
-            ESP_LOGI(TAG, "QQ inbound %s: %.48s%s", chat_id, content, strlen(content) > 48 ? "..." : "");
+    normalized_content = cap_im_qq_strip_mentions(content, is_group);
+    if (!normalized_content) {
+        ESP_LOGW(TAG, "Failed to normalize QQ inbound content");
+        return;
+    }
+
+    if (attachment_notes[0]) {
+        size_t content_len = strlen(normalized_content);
+        size_t notes_len = strlen(attachment_notes);
+
+        combined_content = calloc(1, content_len + notes_len + 1);
+        if (!combined_content) {
+            free(normalized_content);
+            ESP_LOGW(TAG, "Failed to combine QQ message and attachment notes");
+            return;
+        }
+        memcpy(combined_content, normalized_content, content_len);
+        memcpy(combined_content + content_len, attachment_notes, notes_len + 1);
+    }
+
+    if ((normalized_content && normalized_content[0]) || attachment_notes[0]) {
+        const char *published_content = combined_content ? combined_content : normalized_content;
+
+        if (cap_im_qq_publish_inbound_text(chat_id,
+                                            sender_id,
+                                            message_id,
+                                            published_content) == ESP_OK) {
+            ESP_LOGI(TAG,
+                     "QQ inbound %s: %.48s%s",
+                     chat_id,
+                     published_content,
+                     strlen(published_content) > 48 ? "..." : "");
         } else {
             ESP_LOGW(TAG, "Failed to publish QQ inbound message");
         }
     }
+
+    free(combined_content);
+    free(normalized_content);
 }
 
 static void cap_im_qq_log_stack_watermark(const char *label)
@@ -1034,18 +1400,47 @@ static void cap_im_qq_process_frame(const char *frame, size_t frame_len)
                 s_qq.heartbeat_interval_ms = heartbeat_json->valueint;
             }
         }
-        s_qq.ws_identify_pending = true;
+        s_qq.ws_resume_pending = s_qq.session_id[0] && s_qq.last_seq >= 0;
+        s_qq.ws_identify_pending = !s_qq.ws_resume_pending;
         s_qq.ws_connected = true;
         break;
     case CAP_IM_QQ_WS_OP_DISPATCH:
+        if (dispatch_type[0] && strncmp(dispatch_type, "GROUP_", 6) == 0) {
+            ESP_LOGI(TAG, "QQ group dispatch received: type=%s", dispatch_type);
+        }
         if (strcmp(dispatch_type, "READY") == 0) {
+            if (cJSON_IsObject(data_json)) {
+                cJSON *session_json = cJSON_GetObjectItem(data_json, "session_id");
+                cJSON *user_json = cJSON_GetObjectItem(data_json, "user");
+                cJSON *id_json = user_json ? cJSON_GetObjectItem(user_json, "id") : NULL;
+
+                if (cJSON_IsString(session_json) && session_json->valuestring) {
+                    strlcpy(s_qq.session_id, session_json->valuestring, sizeof(s_qq.session_id));
+                }
+                if (cJSON_IsString(id_json) && id_json->valuestring) {
+                    strlcpy(s_qq.bot_openid, id_json->valuestring, sizeof(s_qq.bot_openid));
+                }
+            }
             ESP_LOGI(TAG, "QQ gateway ready");
+        } else if (strcmp(dispatch_type, "RESUMED") == 0) {
+            ESP_LOGI(TAG, "QQ gateway session resumed (seq=%d)", s_qq.last_seq);
+        } else if (strcmp(dispatch_type, "INTERACTION_CREATE") == 0) {
+            cap_im_qq_handle_interaction(data_json);
         } else {
             cap_im_qq_handle_dispatch(data_json, dispatch_type);
         }
         break;
     case CAP_IM_QQ_WS_OP_RECONNECT:
+        s_qq.ws_resume_pending = false;
+        s_qq.ws_identify_pending = false;
+        s_qq.ws_should_reconnect = true;
+        break;
     case CAP_IM_QQ_WS_OP_INVALID_SESSION:
+        if (!cJSON_IsTrue(data_json)) {
+            s_qq.session_id[0] = '\0';
+            s_qq.last_seq = -1;
+        }
+        s_qq.ws_resume_pending = false;
         s_qq.ws_should_reconnect = true;
         break;
     case CAP_IM_QQ_WS_OP_HEARTBEAT_ACK:
@@ -1096,9 +1491,10 @@ static void cap_im_qq_ws_event_handler(void *arg,
         return;
     }
     if (event_id == WEBSOCKET_EVENT_DISCONNECTED) {
-        s_qq.ws_connected = false;
-        s_qq.ws_identify_pending = false;
-        s_qq.ws_should_reconnect = true;
+    s_qq.ws_connected = false;
+    s_qq.ws_identify_pending = false;
+    s_qq.ws_resume_pending = false;
+    s_qq.ws_should_reconnect = true;
         return;
     }
     if (event_id != WEBSOCKET_EVENT_DATA || !event ||
@@ -1120,9 +1516,10 @@ static void cap_im_qq_ws_event_handler(void *arg,
     }
 }
 
-static esp_err_t cap_im_qq_api_post(const char *path,
-                                    const char *body_json,
-                                    char **out_response)
+static esp_err_t cap_im_qq_api_request(esp_http_client_method_t method,
+                                       const char *path,
+                                       const char *body_json,
+                                       char **out_response)
 {
     int attempt = 0;
 
@@ -1177,7 +1574,7 @@ retry:
         return ESP_FAIL;
     }
 
-    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_method(client, method);
     esp_http_client_set_header(client, "Authorization", auth);
     esp_http_client_set_header(client, "Content-Type", "application/json");
     if (body_json) {
@@ -1202,6 +1599,14 @@ retry:
             attempt++;
             goto retry;
         }
+        if ((status == 429 || status == 500 || status == 502 ||
+                status == 503 || status == 504) && attempt < 2) {
+            uint32_t delay_ms = status == 429 ? 1000U : 500U * (uint32_t)(attempt + 1);
+            free(resp.buf);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+            attempt++;
+            goto retry;
+        }
         if (out_response) {
             *out_response = resp.buf;
         } else {
@@ -1216,6 +1621,13 @@ retry:
         free(resp.buf);
     }
     return ESP_OK;
+}
+
+static esp_err_t cap_im_qq_api_post(const char *path,
+                                    const char *body_json,
+                                    char **out_response)
+{
+    return cap_im_qq_api_request(HTTP_METHOD_POST, path, body_json, out_response);
 }
 
 static char *cap_im_qq_build_chat_path(const char *chat_id, const char *suffix)
@@ -1330,6 +1742,7 @@ static esp_err_t cap_im_qq_send_media_message(const char *chat_id,
     cJSON *media = NULL;
     char *json_str = NULL;
     char *path = NULL;
+    char *response = NULL;
     esp_err_t err;
 
     if (!chat_id || !file_info || !file_info[0]) {
@@ -1364,7 +1777,11 @@ static esp_err_t cap_im_qq_send_media_message(const char *chat_id,
         return ESP_ERR_INVALID_ARG;
     }
 
-    err = cap_im_qq_api_post(path, json_str, NULL);
+    err = cap_im_qq_api_post(path, json_str, &response);
+    if (err == ESP_OK) {
+        cap_im_qq_record_last_message(chat_id, response);
+    }
+    free(response);
     free(path);
     free(json_str);
     return err;
@@ -1531,11 +1948,222 @@ static esp_err_t cap_im_qq_send_media(const char *chat_id,
     return ESP_OK;
 }
 
-static esp_err_t cap_im_qq_send_message_chunk(const char *chat_id, const char *message)
+static char *cap_im_qq_trim_in_place(char *text)
+{
+    char *start = text;
+    size_t len;
+
+    if (!text) {
+        return text;
+    }
+    while (*start && isspace((unsigned char)*start)) {
+        start++;
+    }
+    if (start != text) {
+        memmove(text, start, strlen(start) + 1);
+    }
+    len = strlen(text);
+    while (len > 0 && isspace((unsigned char)text[len - 1])) {
+        text[--len] = '\0';
+    }
+    return text;
+}
+
+static cJSON *cap_im_qq_build_keyboard_from_text(const char *text, char **out_clean_text)
+{
+    const char *start;
+    const char *end;
+    const char *cursor;
+    const char *suffix;
+    size_t prefix_len;
+    size_t suffix_len;
+    char *clean = NULL;
+    cJSON *keyboard = NULL;
+    cJSON *content = NULL;
+    cJSON *rows = NULL;
+    unsigned int button_index = 0;
+
+    if (out_clean_text) {
+        *out_clean_text = NULL;
+    }
+    if (!text || !out_clean_text) {
+        return NULL;
+    }
+
+    start = strstr(text, "[[buttons]]");
+    if (!start) {
+        *out_clean_text = strdup(text);
+        return NULL;
+    }
+    end = strstr(start + strlen("[[buttons]]"), "[[/buttons]]");
+    if (!end) {
+        *out_clean_text = strdup(text);
+        return NULL;
+    }
+
+    suffix = end + strlen("[[/buttons]]");
+    prefix_len = (size_t)(start - text);
+    suffix_len = strlen(suffix);
+    clean = calloc(1, prefix_len + suffix_len + 1);
+    if (!clean) {
+        return NULL;
+    }
+    memcpy(clean, text, prefix_len);
+    memcpy(clean + prefix_len, suffix, suffix_len + 1);
+    cap_im_qq_trim_in_place(clean);
+
+    keyboard = cJSON_CreateObject();
+    content = cJSON_CreateObject();
+    rows = cJSON_CreateArray();
+    if (!keyboard || !content || !rows) {
+        cJSON_Delete(keyboard);
+        cJSON_Delete(content);
+        cJSON_Delete(rows);
+        free(clean);
+        return NULL;
+    }
+
+    cursor = start + strlen("[[buttons]]");
+    while (cursor < end) {
+        const char *line_end = strchr(cursor, '\n');
+        size_t line_len = line_end && line_end < end ? (size_t)(line_end - cursor) : (size_t)(end - cursor);
+        char *line = calloc(1, line_len + 1);
+        cJSON *row = NULL;
+        cJSON *buttons = NULL;
+        char *cell = NULL;
+
+        if (!line) {
+            break;
+        }
+        memcpy(line, cursor, line_len);
+        cap_im_qq_trim_in_place(line);
+        if (!line[0]) {
+            free(line);
+            cursor = line_end && line_end < end ? line_end + 1 : end;
+            continue;
+        }
+
+        row = cJSON_CreateObject();
+        buttons = cJSON_CreateArray();
+        if (!row || !buttons) {
+            cJSON_Delete(row);
+            cJSON_Delete(buttons);
+            free(line);
+            break;
+        }
+
+        cell = line;
+        while (cell) {
+            char *separator;
+            char *next_cell = strstr(cell, "||");
+            char *label;
+            char *data;
+            cJSON *button;
+            cJSON *render_data;
+            cJSON *action;
+            cJSON *permission;
+            int action_type;
+
+            separator = strchr(cell, '|');
+            if (!separator) {
+                cell = next_cell ? next_cell + 2 : NULL;
+                continue;
+            }
+            if (next_cell && separator >= next_cell) {
+                separator = NULL;
+            }
+            if (!separator) {
+                cell = next_cell ? next_cell + 2 : NULL;
+                continue;
+            }
+            *separator = '\0';
+            if (next_cell) {
+                *next_cell = '\0';
+            }
+            label = cap_im_qq_trim_in_place(cell);
+            data = cap_im_qq_trim_in_place(separator + 1);
+            if (!label[0] || !data[0]) {
+                cell = next_cell ? next_cell + 2 : NULL;
+                continue;
+            }
+
+            button = cJSON_CreateObject();
+            render_data = cJSON_CreateObject();
+            action = cJSON_CreateObject();
+            permission = cJSON_CreateObject();
+            if (!button || !render_data || !action || !permission) {
+                cJSON_Delete(button);
+                cJSON_Delete(render_data);
+                cJSON_Delete(action);
+                cJSON_Delete(permission);
+                break;
+            }
+
+            button_index++;
+            action_type = strncmp(data, "cmd:", 4) == 0 ? 2 :
+                          (strncmp(data, "http://", 7) == 0 || strncmp(data, "https://", 8) == 0 ? 0 : 1);
+            if (action_type == 2) {
+                data += 4;
+                while (*data && isspace((unsigned char)*data)) {
+                    data++;
+                }
+            }
+            cJSON_AddStringToObject(button, "id", "");
+            {
+                char id[24];
+                snprintf(id, sizeof(id), "btn_%u", button_index);
+                cJSON_ReplaceItemInObject(button, "id", cJSON_CreateString(id));
+            }
+            cJSON_AddStringToObject(render_data, "label", label);
+            cJSON_AddStringToObject(render_data, "visited_label", label);
+            cJSON_AddNumberToObject(render_data, "style", 1);
+            cJSON_AddNumberToObject(action, "type", action_type);
+            cJSON_AddNumberToObject(permission, "type", 2);
+            cJSON_AddItemToObject(action, "permission", permission);
+            cJSON_AddStringToObject(action, "data", data);
+            if (action_type == 2) {
+                cJSON_AddBoolToObject(action, "enter", true);
+            }
+            cJSON_AddItemToObject(button, "render_data", render_data);
+            cJSON_AddItemToObject(button, "action", action);
+            cJSON_AddItemToArray(buttons, button);
+            cell = next_cell ? next_cell + 2 : NULL;
+        }
+
+        if (cJSON_GetArraySize(buttons) > 0) {
+            cJSON_AddItemToObject(row, "buttons", buttons);
+            cJSON_AddItemToArray(rows, row);
+        } else {
+            cJSON_Delete(row);
+            cJSON_Delete(buttons);
+        }
+        free(line);
+        cursor = line_end && line_end < end ? line_end + 1 : end;
+    }
+
+    if (cJSON_GetArraySize(rows) == 0) {
+        cJSON_Delete(keyboard);
+        cJSON_Delete(content);
+        cJSON_Delete(rows);
+        free(clean);
+        *out_clean_text = strdup(text);
+        return NULL;
+    }
+
+    cJSON_AddItemToObject(content, "rows", rows);
+    cJSON_AddItemToObject(keyboard, "content", content);
+    *out_clean_text = clean;
+    return keyboard;
+}
+
+static esp_err_t cap_im_qq_send_message_chunk(const char *chat_id,
+                                              const char *message,
+                                              const cJSON *keyboard)
 {
     cJSON *body = cJSON_CreateObject();
     char *json_str = NULL;
     char *path = NULL;
+    char *response = NULL;
     esp_err_t err;
 
     if (!body) {
@@ -1553,6 +2181,15 @@ static esp_err_t cap_im_qq_send_message_chunk(const char *chat_id, const char *m
     } else {
         cJSON_AddStringToObject(body, "content", message);
     }
+    if (keyboard) {
+        cJSON *keyboard_copy = cJSON_Duplicate(keyboard, true);
+
+        if (!keyboard_copy) {
+            cJSON_Delete(body);
+            return ESP_ERR_NO_MEM;
+        }
+        cJSON_AddItemToObject(body, "keyboard", keyboard_copy);
+    }
     cJSON_AddNumberToObject(body, "msg_type", s_qq.msg_type);
     json_str = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);
@@ -1566,7 +2203,11 @@ static esp_err_t cap_im_qq_send_message_chunk(const char *chat_id, const char *m
         return ESP_ERR_INVALID_ARG;
     }
 
-    err = cap_im_qq_api_post(path, json_str, NULL);
+    err = cap_im_qq_api_post(path, json_str, &response);
+    if (err == ESP_OK) {
+        cap_im_qq_record_last_message(chat_id, response);
+    }
+    free(response);
     free(json_str);
     free(path);
     return err;
@@ -1618,9 +2259,9 @@ static void cap_im_qq_ws_task(void *arg)
             continue;
         }
 
-        s_qq.last_seq = -1;
         s_qq.ws_connected = false;
         s_qq.ws_identify_pending = false;
+        s_qq.ws_resume_pending = false;
         s_qq.ws_should_reconnect = false;
         esp_websocket_register_events(s_qq.ws_client,
                                       WEBSOCKET_EVENT_ANY,
@@ -1632,7 +2273,14 @@ static void cap_im_qq_ws_task(void *arg)
         while (s_qq.ws_client && !s_qq.stop_requested) {
             int64_t now_ms = esp_timer_get_time() / 1000LL;
 
-            if (s_qq.ws_identify_pending) {
+            if (s_qq.ws_resume_pending) {
+                if (cap_im_qq_ws_send_resume() == ESP_OK) {
+                    s_qq.ws_resume_pending = false;
+                    last_heartbeat_ms = now_ms;
+                } else {
+                    s_qq.ws_should_reconnect = true;
+                }
+            } else if (s_qq.ws_identify_pending) {
                 if (cap_im_qq_ws_send_identify() == ESP_OK) {
                     s_qq.ws_identify_pending = false;
                     last_heartbeat_ms = now_ms;
@@ -1663,6 +2311,7 @@ static void cap_im_qq_ws_task(void *arg)
         s_qq.ws_client = NULL;
         s_qq.ws_connected = false;
         s_qq.ws_identify_pending = false;
+        s_qq.ws_resume_pending = false;
         s_qq.ws_should_reconnect = false;
         if (s_qq.stop_requested) {
             break;
@@ -1683,9 +2332,13 @@ static void cap_im_qq_reset_runtime_state(void)
     s_qq.inbound_task = NULL;
     s_qq.ws_connected = false;
     s_qq.ws_identify_pending = false;
+    s_qq.ws_resume_pending = false;
     s_qq.ws_should_reconnect = false;
     s_qq.stop_requested = false;
     s_qq.last_seq = -1;
+    s_qq.session_id[0] = '\0';
+    s_qq.bot_openid[0] = '\0';
+    s_qq.dropped_frame_count = 0;
 }
 
 static esp_err_t cap_im_qq_gateway_start(void)
@@ -1934,6 +2587,207 @@ static esp_err_t cap_im_qq_send_file_execute(const char *input_json,
                                         "file");
 }
 
+static esp_err_t cap_im_qq_send_video_execute(const char *input_json,
+                                              const claw_cap_call_context_t *ctx,
+                                              char *output,
+                                              size_t output_size)
+{
+    return cap_im_qq_send_media_execute(input_json, ctx, output, output_size,
+                                        CAP_IM_QQ_FILE_TYPE_VIDEO, "video");
+}
+
+static esp_err_t cap_im_qq_send_audio_execute(const char *input_json,
+                                              const claw_cap_call_context_t *ctx,
+                                              char *output,
+                                              size_t output_size)
+{
+    return cap_im_qq_send_media_execute(input_json, ctx, output, output_size,
+                                        CAP_IM_QQ_FILE_TYPE_AUDIO, "audio");
+}
+
+static esp_err_t cap_im_qq_resolve_group_chat(const cJSON *root,
+                                              const claw_cap_call_context_t *ctx,
+                                              char *chat_id,
+                                              size_t chat_id_size,
+                                              char *group_openid,
+                                              size_t group_openid_size)
+{
+    cJSON *chat_id_json = root ? cJSON_GetObjectItem(root, "chat_id") : NULL;
+    cJSON *group_json = root ? cJSON_GetObjectItem(root, "group_openid") : NULL;
+    const char *candidate = NULL;
+
+    if (cJSON_IsString(chat_id_json) && chat_id_json->valuestring &&
+            chat_id_json->valuestring[0]) {
+        candidate = chat_id_json->valuestring;
+    } else if (ctx && ctx->chat_id && ctx->chat_id[0]) {
+        candidate = ctx->chat_id;
+    }
+
+    if (cJSON_IsString(group_json) && group_json->valuestring &&
+            group_json->valuestring[0]) {
+        snprintf(chat_id, chat_id_size, "group:%s", group_json->valuestring);
+        strlcpy(group_openid, group_json->valuestring, group_openid_size);
+    } else if (candidate && strncmp(candidate, "group:", 6) == 0 && candidate[6]) {
+        strlcpy(chat_id, candidate, chat_id_size);
+        strlcpy(group_openid, candidate + 6, group_openid_size);
+    } else {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t cap_im_qq_group_query_execute(const char *input_json,
+                                               const claw_cap_call_context_t *ctx,
+                                               char *output,
+                                               size_t output_size,
+                                               const char *resource,
+                                               const char *label)
+{
+    cJSON *root = NULL;
+    char chat_id[CAP_IM_QQ_NAME_BUF_SIZE] = {0};
+    char group_openid[CAP_IM_QQ_NAME_BUF_SIZE] = {0};
+    char path[CAP_IM_QQ_PATH_BUF_SIZE];
+    char *response = NULL;
+    esp_err_t err;
+
+    root = cJSON_Parse(input_json ? input_json : "{}");
+    if (!root) {
+        snprintf(output, output_size, "Error: invalid JSON");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    err = cap_im_qq_resolve_group_chat(root,
+                                       ctx,
+                                       chat_id,
+                                       sizeof(chat_id),
+                                       group_openid,
+                                       sizeof(group_openid));
+    cJSON_Delete(root);
+    if (err != ESP_OK) {
+        snprintf(output,
+                 output_size,
+                 "Error: group_openid or a group chat context is required");
+        return err;
+    }
+
+    snprintf(path, sizeof(path), "/v2/groups/%s/%s", group_openid, resource);
+    err = cap_im_qq_api_request(HTTP_METHOD_GET, path, NULL, &response);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "QQ %s failed for %s: %s", label, chat_id, esp_err_to_name(err));
+        snprintf(output, output_size, "Error: %s", esp_err_to_name(err));
+        free(response);
+        return err;
+    }
+
+    snprintf(output, output_size, "%s", response ? response : "{}");
+    free(response);
+    return ESP_OK;
+}
+
+static esp_err_t cap_im_qq_group_info_execute(const char *input_json,
+                                              const claw_cap_call_context_t *ctx,
+                                              char *output,
+                                              size_t output_size)
+{
+    return cap_im_qq_group_query_execute(input_json,
+                                         ctx,
+                                         output,
+                                         output_size,
+                                         "info",
+                                         "group info query");
+}
+
+static esp_err_t cap_im_qq_bot_state_execute(const char *input_json,
+                                             const claw_cap_call_context_t *ctx,
+                                             char *output,
+                                             size_t output_size)
+{
+    return cap_im_qq_group_query_execute(input_json,
+                                         ctx,
+                                         output,
+                                         output_size,
+                                         "bot_state",
+                                         "bot state query");
+}
+
+static esp_err_t cap_im_qq_recall_execute(const char *input_json,
+                                          const claw_cap_call_context_t *ctx,
+                                          char *output,
+                                          size_t output_size)
+{
+    cJSON *root = NULL;
+    cJSON *chat_id_json;
+    cJSON *message_id_json;
+    const char *chat_id = NULL;
+    const char *message_id = NULL;
+    char resolved_message_id[CAP_IM_QQ_NAME_BUF_SIZE] = {0};
+    char suffix[CAP_IM_QQ_NAME_BUF_SIZE + 16];
+    char *path = NULL;
+    esp_err_t err;
+
+    root = cJSON_Parse(input_json ? input_json : "{}");
+    if (!root) {
+        snprintf(output, output_size, "Error: invalid JSON");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    chat_id_json = cJSON_GetObjectItem(root, "chat_id");
+    message_id_json = cJSON_GetObjectItem(root, "message_id");
+    if (cJSON_IsString(chat_id_json) && chat_id_json->valuestring &&
+            chat_id_json->valuestring[0]) {
+        chat_id = chat_id_json->valuestring;
+    } else if (ctx && ctx->chat_id && ctx->chat_id[0]) {
+        chat_id = ctx->chat_id;
+    }
+    if (cJSON_IsString(message_id_json) && message_id_json->valuestring &&
+            message_id_json->valuestring[0]) {
+        message_id = message_id_json->valuestring;
+    }
+
+    if (!chat_id || (strncmp(chat_id, "c2c:", 4) != 0 &&
+                     strncmp(chat_id, "group:", 6) != 0)) {
+        cJSON_Delete(root);
+        snprintf(output, output_size, "Error: a c2c:<openid> or group:<openid> chat_id is required");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!message_id) {
+        if (cap_im_qq_get_last_message(chat_id,
+                                       resolved_message_id,
+                                       sizeof(resolved_message_id)) != ESP_OK) {
+            cJSON_Delete(root);
+            snprintf(output, output_size, "Error: no recent QQ message is available to recall");
+            return ESP_ERR_NOT_FOUND;
+        }
+        message_id = resolved_message_id;
+    }
+    if (!message_id[0] || strchr(message_id, '/') || strchr(message_id, '?')) {
+        cJSON_Delete(root);
+        snprintf(output, output_size, "Error: invalid message_id");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    strlcpy(resolved_message_id, message_id, sizeof(resolved_message_id));
+    message_id = resolved_message_id;
+    snprintf(suffix, sizeof(suffix), "messages/%s", message_id);
+    path = cap_im_qq_build_chat_path(chat_id, suffix);
+    cJSON_Delete(root);
+    if (!path) {
+        snprintf(output, output_size, "Error: invalid chat_id");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    err = cap_im_qq_api_request(HTTP_METHOD_DELETE, path, NULL, NULL);
+    free(path);
+    if (err != ESP_OK) {
+        snprintf(output, output_size, "Error: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    snprintf(output, output_size, "QQ message recalled: %s", message_id);
+    return ESP_OK;
+}
+
 static const claw_cap_descriptor_t s_qq_descriptors[] = {
     {
         .id = "qq_gateway",
@@ -1980,6 +2834,61 @@ static const claw_cap_descriptor_t s_qq_descriptors[] = {
         .input_schema_json =
         "{\"type\":\"object\",\"properties\":{\"chat_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"caption\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
         .execute = cap_im_qq_send_file_execute,
+    },
+    {
+        .id = "qq_send_video",
+        .name = "qq_send_video",
+        .family = "im",
+        .description = "Send a video file from a local path to a QQ chat.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json =
+        "{\"type\":\"object\",\"properties\":{\"chat_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"caption\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
+        .execute = cap_im_qq_send_video_execute,
+    },
+    {
+        .id = "qq_send_audio",
+        .name = "qq_send_audio",
+        .family = "im",
+        .description = "Send an audio or voice file from a local path to a QQ chat.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json =
+        "{\"type\":\"object\",\"properties\":{\"chat_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"caption\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
+        .execute = cap_im_qq_send_audio_execute,
+    },
+    {
+        .id = "qq_get_group_info",
+        .name = "qq_get_group_info",
+        .family = "im",
+        .description = "Query QQ group name, description, tags, and member count.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json =
+        "{\"type\":\"object\",\"properties\":{\"group_openid\":{\"type\":\"string\"},\"chat_id\":{\"type\":\"string\"}}}",
+        .execute = cap_im_qq_group_info_execute,
+    },
+    {
+        .id = "qq_get_bot_state",
+        .name = "qq_get_bot_state",
+        .family = "im",
+        .description = "Query the QQ bot's role, message receive mode, and proactive push state in a group.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json =
+        "{\"type\":\"object\",\"properties\":{\"group_openid\":{\"type\":\"string\"},\"chat_id\":{\"type\":\"string\"}}}",
+        .execute = cap_im_qq_bot_state_execute,
+    },
+    {
+        .id = "qq_recall_message",
+        .name = "qq_recall_message",
+        .family = "im",
+        .description = "Recall the bot's most recent QQ message in the current chat, or a specific message_id. QQ time and permission limits apply.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json =
+        "{\"type\":\"object\",\"properties\":{\"chat_id\":{\"type\":\"string\"},\"message_id\":{\"type\":\"string\"}}}",
+        .execute = cap_im_qq_recall_execute,
     },
 };
 
@@ -2069,12 +2978,16 @@ esp_err_t cap_im_qq_stop(void)
 
 esp_err_t cap_im_qq_send_text(const char *chat_id, const char *text)
 {
+    char *cleaned_text = NULL;
+    cJSON *keyboard = NULL;
+    const char *send_text = text;
     if (!s_qq_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
 
     size_t text_len;
     size_t offset = 0;
+    size_t chunk_count = 0;
     esp_err_t last_err = ESP_OK;
 
     if (!chat_id || !text || text[0] == '\0') {
@@ -2084,34 +2997,64 @@ esp_err_t cap_im_qq_send_text(const char *chat_id, const char *text)
         return ESP_ERR_INVALID_STATE;
     }
 
-    text_len = strlen(text);
+    keyboard = cap_im_qq_build_keyboard_from_text(text, &cleaned_text);
+    if (cleaned_text) {
+        send_text = cleaned_text;
+    }
+    if ((!send_text || !send_text[0]) && keyboard) {
+        free(cleaned_text);
+        cleaned_text = strdup("请选择：");
+        if (!cleaned_text) {
+            cJSON_Delete(keyboard);
+            return ESP_ERR_NO_MEM;
+        }
+        send_text = cleaned_text;
+    }
+
+    text_len = strlen(send_text);
     while (offset < text_len) {
+        if (chunk_count >= CAP_IM_QQ_MAX_REPLY_CHUNKS) {
+            ESP_LOGW(TAG, "QQ text reply truncated after %d chunks", CAP_IM_QQ_MAX_REPLY_CHUNKS);
+            break;
+        }
         size_t chunk_len = text_len - offset;
         char *chunk = NULL;
         esp_err_t err;
 
         if (chunk_len > CAP_IM_QQ_MAX_MSG_LEN) {
-            chunk_len = claw_utils_utf8_prefix_len(text + offset, CAP_IM_QQ_MAX_MSG_LEN);
+            chunk_len = claw_utils_utf8_prefix_len(send_text + offset, CAP_IM_QQ_MAX_MSG_LEN);
             if (chunk_len == 0) {
+                free(cleaned_text);
+                cJSON_Delete(keyboard);
                 return ESP_ERR_INVALID_ARG;
             }
         }
 
         chunk = calloc(1, chunk_len + 1);
         if (!chunk) {
+            free(cleaned_text);
+            cJSON_Delete(keyboard);
             return ESP_ERR_NO_MEM;
         }
-        memcpy(chunk, text + offset, chunk_len);
+        memcpy(chunk, send_text + offset, chunk_len);
 
-        err = cap_im_qq_send_message_chunk(chat_id, chunk);
+        err = cap_im_qq_send_message_chunk(chat_id,
+                                            chunk,
+                                            keyboard && offset + chunk_len == text_len ? keyboard : NULL);
         free(chunk);
         if (err != ESP_OK) {
             last_err = err;
         }
 
         offset += chunk_len;
+        chunk_count++;
+        if (offset < text_len) {
+            vTaskDelay(pdMS_TO_TICKS(CAP_IM_QQ_CHUNK_DELAY_MS));
+        }
     }
 
+    free(cleaned_text);
+    cJSON_Delete(keyboard);
     return last_err;
 }
 
@@ -2137,4 +3080,20 @@ esp_err_t cap_im_qq_send_file(const char *chat_id, const char *path, const char 
                                 caption,
                                 CAP_IM_QQ_FILE_TYPE_FILE,
                                 "file");
+}
+
+esp_err_t cap_im_qq_send_video(const char *chat_id, const char *path, const char *caption)
+{
+    if (!s_qq_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return cap_im_qq_send_media(chat_id, path, caption, CAP_IM_QQ_FILE_TYPE_VIDEO, "video");
+}
+
+esp_err_t cap_im_qq_send_audio(const char *chat_id, const char *path, const char *caption)
+{
+    if (!s_qq_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return cap_im_qq_send_media(chat_id, path, caption, CAP_IM_QQ_FILE_TYPE_AUDIO, "audio");
 }

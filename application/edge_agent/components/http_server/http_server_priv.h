@@ -25,6 +25,7 @@ typedef struct {
 } http_server_ctx_t;
 
 http_server_ctx_t *http_server_ctx(void);
+bool http_server_require_auth(httpd_req_t *req);
 
 char *http_server_alloc_scratch_buffer(void);
 bool http_server_path_is_safe(const char *path);
@@ -48,6 +49,7 @@ esp_err_t http_server_register_assets_routes(httpd_handle_t server);
 esp_err_t http_server_register_capabilities_routes(httpd_handle_t server);
 esp_err_t http_server_register_lua_modules_routes(httpd_handle_t server);
 esp_err_t http_server_register_config_routes(httpd_handle_t server);
+esp_err_t http_server_register_maintenance_routes(httpd_handle_t server);
 esp_err_t http_server_register_status_routes(httpd_handle_t server);
 esp_err_t http_server_register_files_routes(httpd_handle_t server);
 #if CONFIG_APP_CLAW_LUA_MODULE_HTTP_SERVER

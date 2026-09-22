@@ -15,6 +15,8 @@
 
 #include "cJSON.h"
 #include "claw_cap.h"
+#include "claw_agent_mgr.h"
+#include "claw_session_mgr.h"
 #include "claw_version.h"
 #include "claw_task.h"
 #include "esp_check.h"
@@ -913,6 +915,76 @@ static esp_err_t cap_system_execute_restart(const char *input_json,
     return ESP_OK;
 }
 
+static esp_err_t cap_system_execute_im_control(const char *input_json,
+                                               const claw_cap_call_context_t *ctx,
+                                               char *output,
+                                               size_t output_size)
+{
+    cJSON *root = NULL;
+    cJSON *command_item;
+    const char *command = NULL;
+    claw_core_handle_t core;
+
+    if (!output || output_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    root = cJSON_Parse(input_json ? input_json : "{}");
+    command_item = root ? cJSON_GetObjectItemCaseSensitive(root, "command") : NULL;
+    if (cJSON_IsString(command_item)) {
+        command = command_item->valuestring;
+    }
+    if (!command || !command[0]) {
+        cJSON_Delete(root);
+        snprintf(output, output_size,
+                 "可用命令：/stop 停止当前任务\n/reset 新建会话\n/stats 查看状态\n/help 查看帮助");
+        return ESP_OK;
+    }
+
+    core = claw_agent_mgr_get_root_core();
+    if (strcmp(command, "/stop") == 0) {
+        esp_err_t err = core ? claw_core_cancel_request(core, 0) : ESP_ERR_INVALID_STATE;
+        snprintf(output, output_size, "%s",
+                 err == ESP_OK ? "已请求停止当前任务。" : "当前没有正在运行的任务。");
+        cJSON_Delete(root);
+        return ESP_OK;
+    }
+    if (strcmp(command, "/stats") == 0) {
+        claw_core_agent_loop_phase_t phase = core ? claw_core_get_agent_loop_phase(core) : 0;
+        snprintf(output, output_size,
+                 "ESP-Claw 状态\n运行阶段: %d\n剩余堆: %u bytes\n会话: %s",
+                 (int)phase,
+                 (unsigned)esp_get_free_heap_size(),
+                 ctx && ctx->session_id ? ctx->session_id : "unknown");
+        cJSON_Delete(root);
+        return ESP_OK;
+    }
+    if (strcmp(command, "/reset") == 0) {
+        char alias[CLAW_SESSION_MGR_ALIAS_MAX + 1] = {0};
+        esp_err_t err;
+        if (!ctx || !ctx->channel || !ctx->chat_id) {
+            cJSON_Delete(root);
+            snprintf(output, output_size, "无法重置：缺少聊天上下文。");
+            return ESP_ERR_INVALID_ARG;
+        }
+        err = claw_session_mgr_new_chat_session(0,
+                                                ctx->channel,
+                                                ctx->chat_id,
+                                                NULL,
+                                                false,
+                                                alias,
+                                                sizeof(alias));
+        snprintf(output, output_size, err == ESP_OK ? "已重置当前会话：%s" : "会话重置失败：%s",
+                 err == ESP_OK ? alias : esp_err_to_name(err));
+        cJSON_Delete(root);
+        return err;
+    }
+
+    snprintf(output, output_size,
+             "/stop 停止当前任务\n/reset 新建会话\n/stats 查看状态\n/help 查看帮助");
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
 static const claw_cap_descriptor_t s_system_descriptors[] = {
     {
         .id = "get_system_info",
@@ -947,6 +1019,16 @@ static const claw_cap_descriptor_t s_system_descriptors[] = {
         .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"delay_ms\":{\"type\":\"integer\",\"minimum\":0}}}",
         .execute = cap_system_execute_restart,
+    },
+    {
+        .id = "im_control_command",
+        .name = "im_control_command",
+        .family = "system",
+        .description = "Handle QQ/Web IM control commands: /stop, /reset, /stats and /help.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}",
+        .execute = cap_system_execute_im_control,
     },
 };
 

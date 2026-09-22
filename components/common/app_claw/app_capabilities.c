@@ -750,7 +750,7 @@ static const app_capability_group_entry_t s_capability_group_entries[] = {
     { "cap_agent_mgr", "Agent Manager", "Register agent manager cap", true, NULL, app_cap_register_agent_mgr },
 #endif
 #if CONFIG_APP_CLAW_CAP_IM_QQ
-    { "cap_im_qq", "QQ", "Register QQ cap", false, app_cap_prepare_im_qq, app_cap_register_im_qq },
+    { "cap_im_qq", "QQ", "Register QQ cap", true, app_cap_prepare_im_qq, app_cap_register_im_qq },
 #endif
 #if CONFIG_APP_CLAW_CAP_IM_FEISHU
     { "cap_im_feishu", "Feishu", "Register Feishu cap", false, app_cap_prepare_im_feishu, app_cap_register_im_feishu },
@@ -807,7 +807,7 @@ static const app_capability_group_info_t s_capability_group_infos[] = {
     { "cap_agent_mgr", "Agent Manager", true },
 #endif
 #if CONFIG_APP_CLAW_CAP_IM_QQ
-    { "cap_im_qq", "QQ", false },
+    { "cap_im_qq", "QQ", true },
 #endif
 #if CONFIG_APP_CLAW_CAP_IM_FEISHU
     { "cap_im_feishu", "Feishu", false },

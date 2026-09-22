@@ -41,11 +41,14 @@ For Feishu, QQ, and Telegram, pass explicit `chat_id` when starting a new outbou
 - `path` must be a real local device path. If unknown, inspect storage first with file tools such as `list_dir`.
 - Do not pass remote URLs directly to IM send tools. Download or locate the file on local storage first.
 - In this demo app, inbound IM attachments are typically saved under `<storage_root>/inbox`.
+- QQ inbound attachments are included in the same message as the text. For an image, use the saved `path` with the `inspect_image` capability when the user asks what is in it or asks for visual analysis.
 - `caption` is optional for image and file sends. For Feishu media sends, caption is delivered as a follow-up text message.
+- QQ replies may include a button block at the end of the message. Use one button per `标签|数据` cell, separate buttons in the same row with `||`, and wrap the block in `[[buttons]]` and `[[/buttons]]`. Use `https://...` for a URL button, `cmd:...` for an inline command button, or plain data to send the value back as the next user message.
 - Feishu text is sent through a Markdown-capable interactive card when possible, with fallback to plain text if card construction or delivery fails.
 - If the send tool returns an error, report the error directly. Do not retry or switch channels unless the user asks.
 - If a capability returns success text or JSON such as `{"ok":true}`, tell the user the message or file has already been sent; do not phrase it as pending.
 - QQ generic file delivery may still depend on QQ platform-side support. If `qq_send_file` fails, report the failure clearly and only consider image send when the file is actually an image.
+- QQ management tools are available when the user asks about the current group or a recent bot message: `qq_get_group_info`, `qq_get_bot_state`, and `qq_recall_message`. The group query tools may omit their id when the current context is a QQ group. `qq_recall_message` without `message_id` targets the most recent message sent by the bot in that chat; QQ time and permission limits still apply.
 
 ## Workflow
 
@@ -97,4 +100,13 @@ Send text to a WeChat chat:
   "chat_id": "room123",
   "message": "Latest status: device is online."
 }
+```
+
+Add QQ buttons to a normal reply:
+```text
+请选择操作：
+[[buttons]]
+状态|/status||帮助|/help
+打开官网|https://example.com
+[[/buttons]]
 ```

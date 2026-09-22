@@ -154,10 +154,36 @@ async function request<T>(
   init: RequestInit | undefined,
   fallbackError: string,
 ): Promise<T> {
-  const response = await fetch(url, {
+  const auth = () => {
+    try {
+      return sessionStorage.getItem('esp-claw.web-token') || '';
+    } catch {
+      return '';
+    }
+  };
+  const withAuth = (base?: HeadersInit, override?: string): Headers => {
+    const headers = new Headers(base);
+    const token = override ?? auth();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    return headers;
+  };
+  const makeInit = (tokenOverride?: string): RequestInit => ({
     cache: 'no-store',
     ...init,
+    headers: withAuth(init?.headers, tokenOverride),
   });
+  let response = await fetch(url, makeInit());
+  if (response.status === 401 && typeof window !== 'undefined') {
+    const token = window.prompt('请输入设备 AP 密码');
+    if (token) {
+      try {
+        sessionStorage.setItem('esp-claw.web-token', token);
+      } catch {
+        /* ignore storage errors */
+      }
+      response = await fetch(url, makeInit(token));
+    }
+  }
   if (!response.ok) {
     throw await parseError(response, fallbackError);
   }
@@ -194,6 +220,20 @@ export function fetchConfigFields(fields: (keyof AppConfig)[]) {
 /** Partial save: only keys present in the patch are written; absent
  * keys remain untouched in NVS. */
 export async function saveConfigPatch(patch: Partial<AppConfig>) {
+  const sensitive = new Set<keyof AppConfig>([
+    'wifi_password',
+    'ap_password',
+    'llm_api_key',
+    'qq_app_secret',
+    'feishu_app_secret',
+    'tg_bot_token',
+    'wechat_token',
+    'search_brave_key',
+    'search_tavily_key',
+  ]);
+  const safePatch = Object.fromEntries(
+    Object.entries(patch).filter(([key, value]) => !(sensitive.has(key as keyof AppConfig) && value === '')),
+  ) as Partial<AppConfig>;
   return request<{
     ok?: boolean;
     applied?: number;
@@ -204,7 +244,7 @@ export async function saveConfigPatch(patch: Partial<AppConfig>) {
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
+      body: JSON.stringify(safePatch),
     },
     'Failed to save config',
   );
@@ -238,7 +278,11 @@ export async function fetchFileList(path: string, signal?: AbortSignal) {
 }
 
 export async function fetchFileContent(path: string, options: { allowMissing?: boolean } = {}) {
-  const response = await fetch('/files' + path, { cache: 'no-store' });
+  const token = sessionStorage.getItem('esp-claw.web-token') || '';
+  const response = await fetch('/files' + path, {
+    cache: 'no-store',
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
   if (!response.ok) {
     if (options.allowMissing && response.status === 404) {
       return { content: '', missing: true };
@@ -409,6 +453,42 @@ export async function restartDevice() {
   );
 }
 
+export async function downloadConfigBackup(): Promise<void> {
+  const token = sessionStorage.getItem('esp-claw.web-token') || '';
+  const response = await fetch('/api/config/backup', {
+    cache: 'no-store',
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!response.ok) throw await parseError(response, 'Failed to download backup');
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'esp-claw-config.json';
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function restoreConfigBackup(file: File) {
+  return request<{ ok?: boolean; message?: string }>(
+    '/api/config/restore',
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: await file.text() },
+    'Failed to restore backup',
+  );
+}
+
+export async function startOta(url: string) {
+  return request<{ ok?: boolean; message?: string }>(
+    '/api/ota',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    },
+    'Failed to start OTA',
+  );
+}
+
 export type WebImLink = { url: string; label: string };
 export type WebImMessage = {
   seq: number;
@@ -437,7 +517,8 @@ export function webimWebSocketUrl(): string {
     return 'ws://127.0.0.1/ws/webim';
   }
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${window.location.host}/ws/webim`;
+  const token = encodeURIComponent(sessionStorage.getItem('esp-claw.web-token') || '');
+  return `${proto}//${window.location.host}/ws/webim?token=${token}`;
 }
 
 export async function sendWebimMessage(chatId: string, text: string, files: string[] = []) {

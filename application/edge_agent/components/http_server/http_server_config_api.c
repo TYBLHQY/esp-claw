@@ -82,6 +82,19 @@ static const size_t CONFIG_FIELD_COUNT = sizeof(CONFIG_FIELDS) / sizeof(CONFIG_F
 
 static const char *TAG = "http_config_api";
 
+static bool config_field_is_sensitive(const char *name)
+{
+    static const char *const names[] = {
+        "wifi_password", "ap_password", "llm_api_key", "qq_app_secret",
+        "feishu_app_secret", "tg_bot_token", "wechat_token",
+        "search_brave_key", "search_tavily_key",
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (strcmp(name, names[i]) == 0) return true;
+    }
+    return false;
+}
+
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
 static bool csv_contains(const char *csv, const char *token)
@@ -195,7 +208,9 @@ static esp_err_t emit_config(httpd_req_t *req,
         if (!field_matches_filter(field, groups_csv, fields_csv)) {
             continue;
         }
-        http_server_json_add_string(root, field->name, field_value(config, field));
+        http_server_json_add_string(root,
+                                    field->name,
+                                    config_field_is_sensitive(field->name) ? "" : field_value(config, field));
     }
 
     if (extra_meta) {
@@ -209,6 +224,7 @@ static esp_err_t emit_config(httpd_req_t *req,
 
 static esp_err_t config_get_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     http_server_ctx_t *ctx = http_server_ctx();
     app_config_t *config = NULL;
     esp_err_t err;
@@ -273,6 +289,19 @@ static esp_err_t config_get_handler(httpd_req_t *req)
 
             cJSON_AddItemToObject(meta, "groups", groups);
             cJSON_AddItemToObject(meta, "fields", fields);
+            cJSON *sensitive = cJSON_CreateArray();
+            if (sensitive) {
+                for (size_t i = 0; i < CONFIG_FIELD_COUNT; i++) {
+                    const config_field_def_t *field = &CONFIG_FIELDS[i];
+                    if (!config_field_is_sensitive(field->name)) continue;
+                    cJSON *entry = cJSON_CreateObject();
+                    if (!entry) continue;
+                    cJSON_AddStringToObject(entry, "name", field->name);
+                    cJSON_AddBoolToObject(entry, "configured", field_value(config, field)[0] != '\0');
+                    cJSON_AddItemToArray(sensitive, entry);
+                }
+                cJSON_AddItemToObject(meta, "sensitive", sensitive);
+            }
         } else {
             cJSON_Delete(groups);
             cJSON_Delete(fields);
@@ -290,6 +319,7 @@ static esp_err_t config_get_handler(httpd_req_t *req)
 
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     http_server_ctx_t *ctx = http_server_ctx();
     app_config_t *config = NULL;
     esp_err_t err;

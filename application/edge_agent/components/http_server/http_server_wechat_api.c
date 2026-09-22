@@ -10,6 +10,7 @@
 
 static esp_err_t wechat_login_start_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     http_server_ctx_t *ctx = http_server_ctx();
     cJSON *root = NULL;
     http_server_wechat_login_status_t *status = NULL;
@@ -64,6 +65,7 @@ static esp_err_t wechat_login_start_handler(httpd_req_t *req)
 
 static esp_err_t wechat_login_status_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     http_server_ctx_t *ctx = http_server_ctx();
     http_server_wechat_login_status_t *status = NULL;
     esp_err_t err;
@@ -115,6 +117,7 @@ static esp_err_t wechat_login_status_handler(httpd_req_t *req)
 
 static esp_err_t wechat_login_cancel_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     http_server_ctx_t *ctx = http_server_ctx();
     esp_err_t err = ctx->services.wechat_login_cancel ? ctx->services.wechat_login_cancel() : ESP_ERR_INVALID_STATE;
     if (err != ESP_OK) {

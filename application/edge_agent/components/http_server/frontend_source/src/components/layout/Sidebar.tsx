@@ -10,6 +10,7 @@ import {
   Settings,
   SquareFunction,
   WifiPen,
+  Wrench,
 } from 'lucide-solid';
 import { createMemo, createSignal, For, Show, type Component } from 'solid-js';
 import { t } from '../../i18n';
@@ -29,6 +30,7 @@ const IconCaps: Component = () => <Blocks class={iconClass} />;
 const IconSkills: Component = () => <SquareFunction class={iconClass} />;
 const IconFiles: Component = () => <Folder class={iconClass} />;
 const IconWebIm: Component = () => <MessagesSquare class={iconClass} />;
+const IconMaintenance: Component = () => <Wrench class={iconClass} />;
 
 export type LeafNode = {
   kind: 'leaf';
@@ -43,7 +45,8 @@ export type LeafNode = {
     | 'navCapabilities'
     | 'navLuaModules'
     | 'navFiles'
-    | 'navWebIm';
+    | 'navWebIm'
+    | 'navMaintenance';
   icon: Component;
 };
 export type GroupNode = {
@@ -74,6 +77,7 @@ export const NAV_TREE: NavNode[] = [
   { kind: 'leaf', id: 'capabilities', labelKey: 'navCapabilities', icon: IconCaps },
   { kind: 'leaf', id: 'skills', labelKey: 'navLuaModules', icon: IconSkills },
   { kind: 'leaf', id: 'files', labelKey: 'navFiles', icon: IconFiles },
+  { kind: 'leaf', id: 'maintenance', labelKey: 'navMaintenance', icon: IconMaintenance },
 ];
 
 export const LEAF_IDS = collectLeafIds(NAV_TREE);

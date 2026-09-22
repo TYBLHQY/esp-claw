@@ -298,6 +298,7 @@ static void webim_build_file_url(const char *storage_path, char *out, size_t out
 
 static esp_err_t webim_status_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     cJSON *root = cJSON_CreateObject();
 
     if (!root) {
@@ -311,6 +312,7 @@ static esp_err_t webim_status_handler(httpd_req_t *req)
 
 static esp_err_t webim_send_handler(httpd_req_t *req)
 {
+    if (!http_server_require_auth(req)) return ESP_OK;
     cJSON *root = NULL;
     const char *chat_id = NULL;
     const char *text = NULL;
@@ -390,6 +392,7 @@ static esp_err_t webim_send_handler(httpd_req_t *req)
 
 static esp_err_t webim_ws_handler(httpd_req_t *req)
 {
+    if (req->method == HTTP_GET && !http_server_require_auth(req)) return ESP_OK;
     httpd_ws_frame_t ws_pkt;
     httpd_ws_frame_t pong_pkt;
     uint8_t *buf = NULL;

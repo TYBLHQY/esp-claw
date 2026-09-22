@@ -41,6 +41,9 @@ const WebImPage = lazy(() =>
 const SetupWizardPage = lazy(() =>
   import('./pages/SetupWizardPage').then((mod) => ({ default: mod.SetupWizardPage })),
 );
+const MaintenancePage = lazy(() =>
+  import('./pages/MaintenancePage').then((mod) => ({ default: mod.MaintenancePage })),
+);
 
 type RouteId = TabId | 'start';
 type RestartRequestOptions = {
@@ -272,6 +275,9 @@ const App: Component = () => {
               </Show>
               <Show when={currentTab() === 'files'}>
                 <FilesPage />
+              </Show>
+              <Show when={currentTab() === 'maintenance'}>
+                <MaintenancePage />
               </Show>
             </Suspense>
           </Layout>

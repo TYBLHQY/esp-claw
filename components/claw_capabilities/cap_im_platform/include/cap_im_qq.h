@@ -31,6 +31,8 @@ esp_err_t cap_im_qq_stop(void);
 esp_err_t cap_im_qq_send_text(const char *chat_id, const char *text);
 esp_err_t cap_im_qq_send_image(const char *chat_id, const char *path, const char *caption);
 esp_err_t cap_im_qq_send_file(const char *chat_id, const char *path, const char *caption);
+esp_err_t cap_im_qq_send_video(const char *chat_id, const char *path, const char *caption);
+esp_err_t cap_im_qq_send_audio(const char *chat_id, const char *path, const char *caption);
 
 #ifdef __cplusplus
 }
