@@ -35,11 +35,13 @@
 
 static const char *TAG = "cap_im_qq";
 
-#define CAP_IM_QQ_TOKEN_URL            "https://bots.qq.com/app/getAppAccessToken"
-#define CAP_IM_QQ_API_BASE             "https://api.sgroup.qq.com"
+#define CAP_IM_QQ_TOKEN_URL            "https://api.bot.qq.com/app/getAppAccessToken"
+#define CAP_IM_QQ_API_BASE             "https://api.bot.qq.com"
 #define CAP_IM_QQ_GATEWAY_URL          CAP_IM_QQ_API_BASE "/gateway"
 #define CAP_IM_QQ_WS_CONNECT_GRACE_MS  10000
 #define CAP_IM_QQ_RECONNECT_DELAY_MS   5000
+#define CAP_IM_QQ_MIN_HEARTBEAT_TIMEOUT_MS 15000
+#define CAP_IM_QQ_HEARTBEAT_TIMEOUT_MULTIPLIER 2
 #define CAP_IM_QQ_MAX_MSG_LEN          1500
 #define CAP_IM_QQ_MAX_REPLY_CHUNKS     4
 #define CAP_IM_QQ_CHUNK_DELAY_MS       250
@@ -119,6 +121,8 @@ typedef struct {
     volatile bool ws_identify_pending;
     volatile bool ws_resume_pending;
     volatile bool ws_should_reconnect;
+    volatile bool heartbeat_pending;
+    volatile int64_t heartbeat_sent_ms;
     volatile bool stop_requested;
     volatile uint32_t dropped_frame_count;
     int msg_type;
@@ -805,18 +809,28 @@ static esp_err_t cap_im_qq_ws_send_heartbeat(void)
 static esp_err_t cap_im_qq_publish_inbound_text(const char *chat_id,
                                                 const char *sender_id,
                                                 const char *message_id,
-                                                const char *content)
+                                                const char *content,
+                                                bool route_to_agent)
 {
     if (!content || !content[0]) {
         return ESP_OK;
     }
 
-    return claw_event_router_publish_message("qq_gateway",
-                                             "qq",
-                                             chat_id,
-                                             content,
-                                             sender_id,
-                                             message_id);
+    if (route_to_agent) {
+        return claw_event_router_publish_message("qq_gateway",
+                                                 "qq",
+                                                 chat_id,
+                                                 content,
+                                                 sender_id,
+                                                 message_id);
+    }
+
+    return claw_event_router_publish_observed_message("qq_gateway",
+                                                      "qq",
+                                                      chat_id,
+                                                      content,
+                                                      sender_id,
+                                                      message_id);
 }
 
 static void cap_im_qq_append_attachment_note(char *notes,
@@ -1226,7 +1240,8 @@ static void cap_im_qq_handle_interaction(cJSON *data)
     if (cap_im_qq_publish_inbound_text(chat_id,
                                        sender_id,
                                        interaction_id,
-                                       button_data) != ESP_OK) {
+                                       button_data,
+                                       true) != ESP_OK) {
         ESP_LOGW(TAG, "Failed to publish QQ interaction: %s", interaction_id);
     } else {
         ESP_LOGI(TAG,
@@ -1248,6 +1263,7 @@ static void cap_im_qq_handle_dispatch(cJSON *data, const char *event_type)
     const char *message_id = NULL;
     bool is_group = false;
     bool is_group_at = false;
+    bool route_to_agent = true;
 
     if (!data || !event_type) {
         return;
@@ -1290,18 +1306,18 @@ static void cap_im_qq_handle_dispatch(cJSON *data, const char *event_type)
         message_id = id_json->valuestring;
         is_group = true;
         is_group_at = strcmp(event_type, "GROUP_AT_MESSAGE_CREATE") == 0;
+        route_to_agent = is_group_at || cap_im_qq_group_content_mentions_bot(content, data);
     } else {
         ESP_LOGI(TAG, "QQ dispatch type %s is not handled", event_type);
         return;
     }
 
-    if (is_group && !is_group_at && !cap_im_qq_group_content_mentions_bot(content, data)) {
+    if (is_group && !route_to_agent) {
         ESP_LOGI(TAG,
-                 "Ignoring QQ group message without bot mention: type=%s chat=%s content=%.80s",
+                 "Observing QQ group message without bot mention: type=%s chat=%s content=%.80s",
                  event_type,
                  chat_id,
                  content ? content : "");
-        return;
     }
 
     if (cap_im_qq_dedup_check_and_record(message_id)) {
@@ -1341,10 +1357,12 @@ static void cap_im_qq_handle_dispatch(cJSON *data, const char *event_type)
         if (cap_im_qq_publish_inbound_text(chat_id,
                                             sender_id,
                                             message_id,
-                                            published_content) == ESP_OK) {
+                                            published_content,
+                                            route_to_agent) == ESP_OK) {
             ESP_LOGI(TAG,
-                     "QQ inbound %s: %.48s%s",
+                     "QQ inbound %s route=%s: %.48s%s",
                      chat_id,
+                     route_to_agent ? "agent" : "observe",
                      published_content,
                      strlen(published_content) > 48 ? "..." : "");
         } else {
@@ -1402,6 +1420,8 @@ static void cap_im_qq_process_frame(const char *frame, size_t frame_len)
         }
         s_qq.ws_resume_pending = s_qq.session_id[0] && s_qq.last_seq >= 0;
         s_qq.ws_identify_pending = !s_qq.ws_resume_pending;
+        s_qq.heartbeat_pending = false;
+        s_qq.heartbeat_sent_ms = 0;
         s_qq.ws_connected = true;
         break;
     case CAP_IM_QQ_WS_OP_DISPATCH:
@@ -1444,6 +1464,8 @@ static void cap_im_qq_process_frame(const char *frame, size_t frame_len)
         s_qq.ws_should_reconnect = true;
         break;
     case CAP_IM_QQ_WS_OP_HEARTBEAT_ACK:
+        s_qq.heartbeat_pending = false;
+        s_qq.heartbeat_sent_ms = 0;
     default:
         break;
     }
@@ -1491,10 +1513,26 @@ static void cap_im_qq_ws_event_handler(void *arg,
         return;
     }
     if (event_id == WEBSOCKET_EVENT_DISCONNECTED) {
-    s_qq.ws_connected = false;
-    s_qq.ws_identify_pending = false;
-    s_qq.ws_resume_pending = false;
-    s_qq.ws_should_reconnect = true;
+        s_qq.ws_connected = false;
+        s_qq.ws_identify_pending = false;
+        s_qq.ws_resume_pending = false;
+        s_qq.heartbeat_pending = false;
+        s_qq.heartbeat_sent_ms = 0;
+        s_qq.ws_should_reconnect = true;
+        return;
+    }
+    if (event_id == WEBSOCKET_EVENT_ERROR) {
+        if (event) {
+            ESP_LOGW(TAG,
+                     "QQ WebSocket error type=%d tls=%s handshake=%d errno=%d",
+                     event->error_handle.error_type,
+                     esp_err_to_name(event->error_handle.esp_tls_last_esp_err),
+                     event->error_handle.esp_ws_handshake_status_code,
+                     event->error_handle.esp_transport_sock_errno);
+        } else {
+            ESP_LOGW(TAG, "QQ WebSocket error without event data");
+        }
+        s_qq.ws_should_reconnect = true;
         return;
     }
     if (event_id != WEBSOCKET_EVENT_DATA || !event ||
@@ -2262,6 +2300,8 @@ static void cap_im_qq_ws_task(void *arg)
         s_qq.ws_connected = false;
         s_qq.ws_identify_pending = false;
         s_qq.ws_resume_pending = false;
+        s_qq.heartbeat_pending = false;
+        s_qq.heartbeat_sent_ms = 0;
         s_qq.ws_should_reconnect = false;
         esp_websocket_register_events(s_qq.ws_client,
                                       WEBSOCKET_EVENT_ANY,
@@ -2276,6 +2316,8 @@ static void cap_im_qq_ws_task(void *arg)
             if (s_qq.ws_resume_pending) {
                 if (cap_im_qq_ws_send_resume() == ESP_OK) {
                     s_qq.ws_resume_pending = false;
+                    s_qq.heartbeat_pending = false;
+                    s_qq.heartbeat_sent_ms = 0;
                     last_heartbeat_ms = now_ms;
                 } else {
                     s_qq.ws_should_reconnect = true;
@@ -2283,16 +2325,39 @@ static void cap_im_qq_ws_task(void *arg)
             } else if (s_qq.ws_identify_pending) {
                 if (cap_im_qq_ws_send_identify() == ESP_OK) {
                     s_qq.ws_identify_pending = false;
+                    s_qq.heartbeat_pending = false;
+                    s_qq.heartbeat_sent_ms = 0;
                     last_heartbeat_ms = now_ms;
                 } else {
                     s_qq.ws_should_reconnect = true;
                 }
-            } else if (s_qq.ws_connected &&
-                       now_ms - last_heartbeat_ms >= s_qq.heartbeat_interval_ms) {
-                if (cap_im_qq_ws_send_heartbeat() != ESP_OK) {
-                    s_qq.ws_should_reconnect = true;
+            } else if (s_qq.ws_connected) {
+                int64_t heartbeat_interval_ms = s_qq.heartbeat_interval_ms > 0 ?
+                                                s_qq.heartbeat_interval_ms : 30000;
+                int64_t heartbeat_timeout_ms = heartbeat_interval_ms *
+                                               CAP_IM_QQ_HEARTBEAT_TIMEOUT_MULTIPLIER;
+
+                if (heartbeat_timeout_ms < CAP_IM_QQ_MIN_HEARTBEAT_TIMEOUT_MS) {
+                    heartbeat_timeout_ms = CAP_IM_QQ_MIN_HEARTBEAT_TIMEOUT_MS;
                 }
-                last_heartbeat_ms = now_ms;
+
+                if (s_qq.heartbeat_pending &&
+                        s_qq.heartbeat_sent_ms > 0 &&
+                        now_ms - s_qq.heartbeat_sent_ms >= heartbeat_timeout_ms) {
+                    ESP_LOGW(TAG,
+                             "QQ heartbeat ACK timeout after %lld ms; reconnecting",
+                             (long long)(now_ms - s_qq.heartbeat_sent_ms));
+                    s_qq.ws_should_reconnect = true;
+                } else if (!s_qq.heartbeat_pending &&
+                           now_ms - last_heartbeat_ms >= heartbeat_interval_ms) {
+                    if (cap_im_qq_ws_send_heartbeat() != ESP_OK) {
+                        s_qq.ws_should_reconnect = true;
+                    } else {
+                        s_qq.heartbeat_pending = true;
+                        s_qq.heartbeat_sent_ms = now_ms;
+                    }
+                    last_heartbeat_ms = now_ms;
+                }
             }
 
             if (s_qq.ws_should_reconnect) {
@@ -2312,6 +2377,8 @@ static void cap_im_qq_ws_task(void *arg)
         s_qq.ws_connected = false;
         s_qq.ws_identify_pending = false;
         s_qq.ws_resume_pending = false;
+        s_qq.heartbeat_pending = false;
+        s_qq.heartbeat_sent_ms = 0;
         s_qq.ws_should_reconnect = false;
         if (s_qq.stop_requested) {
             break;
@@ -2333,6 +2400,8 @@ static void cap_im_qq_reset_runtime_state(void)
     s_qq.ws_connected = false;
     s_qq.ws_identify_pending = false;
     s_qq.ws_resume_pending = false;
+    s_qq.heartbeat_pending = false;
+    s_qq.heartbeat_sent_ms = 0;
     s_qq.ws_should_reconnect = false;
     s_qq.stop_requested = false;
     s_qq.last_seq = -1;

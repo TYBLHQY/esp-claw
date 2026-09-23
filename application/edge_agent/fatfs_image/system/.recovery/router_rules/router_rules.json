@@ -120,6 +120,29 @@
     ]
   },
   {
+    "id": "im_observed_message_context",
+    "description": "Record non-mentioned IM messages in the chat session without invoking the agent.",
+    "enabled": true,
+    "consume_on_match": true,
+    "ack": "{{event.source_channel}} message recorded",
+    "match": {
+      "event_type": "message_observed",
+      "event_key": "text",
+      "content_type": "text"
+    },
+    "actions": [
+      {
+        "type": "run_agent",
+        "input": {
+          "target_channel": "{{event.source_channel}}",
+          "session_policy": "chat",
+          "interrupt": false,
+          "record_only": true
+        }
+      }
+    ]
+  },
+  {
     "id": "im_any_message_working_reply",
     "description": "Reply to any IM text message before other automation handling.",
     "enabled": true,
@@ -176,7 +199,8 @@
         "type": "run_agent",
         "input": {
           "target_channel": "{{event.source_channel}}",
-          "session_policy": "chat"
+          "session_policy": "chat",
+          "interrupt": false
         }
       }
     ]

@@ -21,6 +21,12 @@ esp_err_t claw_event_router_publish_message(const char *source_cap,
                                             const char *text,
                                             const char *sender_id,
                                             const char *message_id);
+esp_err_t claw_event_router_publish_observed_message(const char *source_cap,
+                                                     const char *channel,
+                                                     const char *chat_id,
+                                                     const char *text,
+                                                     const char *sender_id,
+                                                     const char *message_id);
 esp_err_t claw_event_router_publish_trigger(const char *source_cap,
                                             const char *event_type,
                                             const char *event_key,

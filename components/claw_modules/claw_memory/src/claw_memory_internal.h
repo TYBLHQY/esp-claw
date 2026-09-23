@@ -23,7 +23,8 @@
 #define CLAW_MEMORY_MAX_ACTIVE_ITEMS             128
 #define CLAW_MEMORY_COMPACT_CHANGE_THRESHOLD     5
 #define CLAW_MEMORY_COMPACT_SIZE_THRESHOLD       (32 * 1024)
-#define CLAW_MEMORY_SESSION_SIZE_LIMIT           (150 * 1024)
+#define CLAW_MEMORY_SESSION_MESSAGE_LIMIT        80
+#define CLAW_MEMORY_SESSION_SIZE_LIMIT           (64 * 1024)
 #define CLAW_MEMORY_RECALL_DEFAULT_LIMIT         8
 #define CLAW_MEMORY_RECORDS_FILE                 "memory_records.jsonl"
 #define CLAW_MEMORY_INDEX_FILE                   "memory_index.json"

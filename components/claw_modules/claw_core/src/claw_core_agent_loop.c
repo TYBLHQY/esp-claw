@@ -156,6 +156,28 @@ void claw_core_agent_loop_task(void *arg)
         {
             char llm_unavailable_message[192] = {0};
 
+            if (request.view.flags & CLAW_CORE_REQUEST_FLAG_RECORD_ONLY) {
+                const char *texts[1] = {request.view.user_text};
+                bool persisted = false;
+
+                err = claw_core_persist_context_user_messages_if_configured(core,
+                                                                             &request.view,
+                                                                             texts,
+                                                                             1,
+                                                                             &persisted);
+                if (err != ESP_OK) {
+                    response.view.error_message = claw_utils_string_dup(esp_err_to_name(err));
+                } else {
+                    response.view.status = CLAW_CORE_RESPONSE_STATUS_OK;
+                    ESP_LOGI(TAG,
+                             "record-only request=%" PRIu32 " session=%s persisted=%s",
+                             request.view.request_id,
+                             request.view.session_id ? request.view.session_id : "",
+                             persisted ? "true" : "false");
+                }
+                goto finish_request;
+            }
+
             if (!claw_core_llm_config_ready(core,
                                            llm_unavailable_message,
                                            sizeof(llm_unavailable_message))) {

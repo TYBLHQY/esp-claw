@@ -1135,7 +1135,8 @@ static const char *claw_event_router_event_key(const claw_event_t *event)
     if (!event) {
         return "";
     }
-    if (strcmp(event->event_type, "message") == 0) {
+    if (strcmp(event->event_type, "message") == 0 ||
+            strcmp(event->event_type, "message_observed") == 0) {
         return "text";
     }
     if (event->message_id[0]) {
@@ -1749,6 +1750,10 @@ static esp_err_t claw_event_router_execute_agent_action(
     const char *target_channel = NULL;
     const char *target_chat_id = NULL;
     const char *session_policy = NULL;
+    cJSON *interrupt_json = NULL;
+    cJSON *record_only_json = NULL;
+    bool interrupt = true;
+    bool record_only = false;
     claw_event_t agent_event = {0};
     claw_agent_mgr_root_input_t agent_input = {0};
     char submit_output[32] = {0};
@@ -1769,6 +1774,14 @@ static esp_err_t claw_event_router_execute_agent_action(
     target_channel = cJSON_GetStringValue(cJSON_GetObjectItem(rendered_input, "target_channel"));
     target_chat_id = cJSON_GetStringValue(cJSON_GetObjectItem(rendered_input, "target_chat_id"));
     session_policy = cJSON_GetStringValue(cJSON_GetObjectItem(rendered_input, "session_policy"));
+    interrupt_json = cJSON_GetObjectItem(rendered_input, "interrupt");
+    record_only_json = cJSON_GetObjectItem(rendered_input, "record_only");
+    if (cJSON_IsBool(interrupt_json)) {
+        interrupt = cJSON_IsTrue(interrupt_json);
+    }
+    if (cJSON_IsBool(record_only_json)) {
+        record_only = cJSON_IsTrue(record_only_json);
+    }
 
     agent_event = *event;
     if (session_policy && session_policy[0]) {
@@ -1776,10 +1789,16 @@ static esp_err_t claw_event_router_execute_agent_action(
     }
 
     agent_input.session_policy = agent_event.session_policy;
-    agent_input.flags = CLAW_CORE_REQUEST_FLAG_PUBLISH_OUT_MESSAGE |
-                        CLAW_CORE_REQUEST_FLAG_PUBLISH_STAGE_MESSAGE |
-                        CLAW_CORE_REQUEST_FLAG_SKIP_RESPONSE_QUEUE |
-                        CLAW_CORE_REQUEST_FLAG_USER_INTERRUPT;
+    agent_input.flags = CLAW_CORE_REQUEST_FLAG_SKIP_RESPONSE_QUEUE;
+    if (record_only) {
+        agent_input.flags |= CLAW_CORE_REQUEST_FLAG_RECORD_ONLY;
+    } else {
+        agent_input.flags |= CLAW_CORE_REQUEST_FLAG_PUBLISH_OUT_MESSAGE |
+                             CLAW_CORE_REQUEST_FLAG_PUBLISH_STAGE_MESSAGE;
+        if (interrupt) {
+            agent_input.flags |= CLAW_CORE_REQUEST_FLAG_USER_INTERRUPT;
+        }
+    }
     agent_input.request_id = s_runtime->next_request_id++;
     agent_input.user_text = (text && text[0]) ? text : (event->text ? event->text : "");
     agent_input.source_cap = event->source_cap;
@@ -2523,21 +2542,22 @@ esp_err_t claw_event_router_publish(const claw_event_t *event)
     return ESP_OK;
 }
 
-esp_err_t claw_event_router_publish_message(const char *source_cap,
-                                            const char *channel,
-                                            const char *chat_id,
-                                            const char *text,
-                                            const char *sender_id,
-                                            const char *message_id)
+static esp_err_t claw_event_router_publish_text_event(const char *source_cap,
+                                                      const char *channel,
+                                                      const char *chat_id,
+                                                      const char *text,
+                                                      const char *sender_id,
+                                                      const char *message_id,
+                                                      const char *event_type)
 {
     claw_event_t event = {0};
 
-    if (!source_cap || !channel || !chat_id || !text) {
+    if (!source_cap || !channel || !chat_id || !text || !event_type || !event_type[0]) {
         return ESP_ERR_INVALID_ARG;
     }
 
     strlcpy(event.source_cap, source_cap, sizeof(event.source_cap));
-    strlcpy(event.event_type, "message", sizeof(event.event_type));
+    strlcpy(event.event_type, event_type, sizeof(event.event_type));
     strlcpy(event.source_channel, channel, sizeof(event.source_channel));
     strlcpy(event.chat_id, chat_id, sizeof(event.chat_id));
     strlcpy(event.content_type, "text", sizeof(event.content_type));
@@ -2553,6 +2573,38 @@ esp_err_t claw_event_router_publish_message(const char *source_cap,
     snprintf(event.event_id, sizeof(event.event_id), "msg-%" PRId64, event.timestamp_ms);
     event.text = (char *)text;
     return claw_event_router_publish(&event);
+}
+
+esp_err_t claw_event_router_publish_message(const char *source_cap,
+                                            const char *channel,
+                                            const char *chat_id,
+                                            const char *text,
+                                            const char *sender_id,
+                                            const char *message_id)
+{
+    return claw_event_router_publish_text_event(source_cap,
+                                                channel,
+                                                chat_id,
+                                                text,
+                                                sender_id,
+                                                message_id,
+                                                "message");
+}
+
+esp_err_t claw_event_router_publish_observed_message(const char *source_cap,
+                                                     const char *channel,
+                                                     const char *chat_id,
+                                                     const char *text,
+                                                     const char *sender_id,
+                                                     const char *message_id)
+{
+    return claw_event_router_publish_text_event(source_cap,
+                                                channel,
+                                                chat_id,
+                                                text,
+                                                sender_id,
+                                                message_id,
+                                                "message_observed");
 }
 
 esp_err_t claw_event_router_publish_trigger(const char *source_cap,

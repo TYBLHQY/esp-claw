@@ -1529,61 +1529,144 @@ static esp_err_t session_history_analyze_turns(const claw_memory_session_index_t
 static bool session_history_compact_keep_record(const claw_memory_session_turn_t *turns,
                                                 size_t turn_count,
                                                 size_t turn_index,
+                                                size_t keep_from_turn,
                                                 claw_core_context_record_type_t type)
 {
-    if (!turns || turn_index >= turn_count) {
+    if (!turns || turn_index >= turn_count || turn_index < keep_from_turn) {
         return false;
     }
+
+    /* Tool-call records are useful while a request is running, but retaining
+     * old tool payloads makes the persistent context grow much faster. Keep
+     * the rolling window focused on conversational messages. */
     if (type == CLAW_CORE_CONTEXT_RECORD_USER ||
             type == CLAW_CORE_CONTEXT_RECORD_ASSISTANT_FINAL) {
         return true;
     }
-    if (turn_index + 1 == turn_count && !turns[turn_index].completed) {
-        return true;
+    return false;
+}
+
+static size_t session_history_turn_message_count(const claw_memory_session_index_t *index,
+                                                 const claw_memory_session_turn_t *turn)
+{
+    size_t count = 0;
+    size_t i;
+
+    if (!index || !turn) {
+        return 0;
     }
-    return turns[turn_index].keep_tool_records &&
-           (type == CLAW_CORE_CONTEXT_RECORD_ASSISTANT_TOOL ||
-            type == CLAW_CORE_CONTEXT_RECORD_TOOL_RESULT);
+    for (i = turn->start; i < turn->end; i++) {
+        claw_core_context_record_type_t type =
+            (claw_core_context_record_type_t)index->entries[i].record_type;
+        if (type == CLAW_CORE_CONTEXT_RECORD_USER ||
+                type == CLAW_CORE_CONTEXT_RECORD_ASSISTANT_FINAL) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static size_t session_history_turn_data_size(const claw_memory_session_index_t *index,
+                                             const claw_memory_session_turn_t *turn)
+{
+    size_t total = 0;
+    size_t i;
+
+    if (!index || !turn) {
+        return 0;
+    }
+    for (i = turn->start; i < turn->end; i++) {
+        claw_core_context_record_type_t type =
+            (claw_core_context_record_type_t)index->entries[i].record_type;
+        if (type != CLAW_CORE_CONTEXT_RECORD_USER &&
+                type != CLAW_CORE_CONTEXT_RECORD_ASSISTANT_FINAL) {
+            continue;
+        }
+        if (SIZE_MAX - total < index->entries[i].length) {
+            return SIZE_MAX;
+        }
+        total += index->entries[i].length;
+    }
+    return total;
 }
 
 static esp_err_t session_history_plan_compaction(const claw_memory_session_index_t *index,
                                                  const claw_memory_session_turn_t *turns,
                                                  size_t turn_count,
+                                                 size_t *out_keep_from_turn,
                                                  size_t *out_data_size,
                                                  size_t *out_entry_count)
 {
     size_t compacted_data_size = 0;
     size_t compacted_entry_count = 0;
-    size_t turn_index = 0;
+    size_t compacted_message_count = 0;
+    size_t keep_from_turn = turn_count;
+    size_t turn_index;
     size_t i;
 
-    if (!index || !turns || turn_count == 0 || !out_data_size || !out_entry_count) {
+    if (!index || !turns || turn_count == 0 || !out_keep_from_turn ||
+            !out_data_size || !out_entry_count) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    *out_keep_from_turn = turn_count;
     *out_data_size = 0;
     *out_entry_count = 0;
 
+    /* Walk backwards by conversation turn so the window always contains the
+     * newest messages and never starts in the middle of an older turn. */
+    for (turn_index = turn_count; turn_index > 0; turn_index--) {
+        size_t candidate_turn = turn_index - 1;
+        size_t turn_messages = session_history_turn_message_count(index,
+                                                                  &turns[candidate_turn]);
+        size_t turn_size = session_history_turn_data_size(index,
+                                                          &turns[candidate_turn]);
+
+        if (turn_size == SIZE_MAX ||
+                compacted_message_count + turn_messages > CLAW_MEMORY_SESSION_MESSAGE_LIMIT ||
+                compacted_data_size + turn_size > CLAW_MEMORY_SESSION_SIZE_LIMIT) {
+            if (keep_from_turn != turn_count) {
+                break;
+            }
+
+            /* Always retain the newest user turn. A single record larger than
+             * the byte budget cannot be fixed by a rolling window and will be
+             * handled by the existing blocked-session warning. */
+            if (turn_size == SIZE_MAX || turn_size > CLAW_MEMORY_SESSION_SIZE_LIMIT) {
+                keep_from_turn = candidate_turn;
+                compacted_data_size = turn_size;
+                compacted_message_count = turn_messages;
+                break;
+            }
+        }
+
+        keep_from_turn = candidate_turn;
+        compacted_data_size += turn_size;
+        compacted_message_count += turn_messages;
+    }
+
+    if (keep_from_turn == turn_count) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     for (i = 0; i < index->count; i++) {
+        size_t current_turn = 0;
         claw_core_context_record_type_t type =
             (claw_core_context_record_type_t)index->entries[i].record_type;
 
-        while (turn_index + 1 < turn_count && i >= turns[turn_index].end) {
-            turn_index++;
+        while (current_turn + 1 < turn_count && i >= turns[current_turn].end) {
+            current_turn++;
         }
-        if (!session_history_compact_keep_record(turns,
+        if (session_history_compact_keep_record(turns,
                                                  turn_count,
-                                                 turn_index,
+                                                 current_turn,
+                                                 keep_from_turn,
                                                  type)) {
-            continue;
+            compacted_entry_count++;
         }
-        if (SIZE_MAX - compacted_data_size < index->entries[i].length) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        compacted_data_size += index->entries[i].length;
-        compacted_entry_count++;
     }
 
+    *out_keep_from_turn = keep_from_turn;
     *out_data_size = compacted_data_size;
     *out_entry_count = compacted_entry_count;
     return ESP_OK;
@@ -1622,6 +1705,7 @@ static esp_err_t session_history_rewrite_compacted(const char *session_id,
     claw_memory_session_turn_t *turns = NULL;
     size_t compacted_data_size = 0;
     size_t compacted_entry_count = 0;
+    size_t keep_from_turn = 0;
     size_t turn_count = 0;
     size_t turn_index = 0;
     uint32_t write_offset = 0;
@@ -1640,6 +1724,7 @@ static esp_err_t session_history_rewrite_compacted(const char *session_id,
     err = session_history_plan_compaction(index,
                                           turns,
                                           turn_count,
+                                          &keep_from_turn,
                                           &compacted_data_size,
                                           &compacted_entry_count);
     if (err != ESP_OK) {
@@ -1682,6 +1767,7 @@ static esp_err_t session_history_rewrite_compacted(const char *session_id,
         if (!session_history_compact_keep_record(turns,
                                                  turn_count,
                                                  turn_index,
+                                                 keep_from_turn,
                                                  type)) {
             continue;
         }
@@ -1775,6 +1861,30 @@ cleanup:
     return err;
 }
 
+static bool session_history_compaction_needed(const char *data_path,
+                                              const char *idx_path)
+{
+    size_t data_size;
+    size_t idx_size;
+
+    if (!data_path || !idx_path) {
+        return false;
+    }
+
+    data_size = file_size_bytes(data_path);
+    if (data_size > CLAW_MEMORY_SESSION_SIZE_LIMIT) {
+        return true;
+    }
+
+    idx_size = file_size_bytes(idx_path);
+    if (idx_size < sizeof(claw_memory_session_index_header_t)) {
+        return false;
+    }
+    idx_size -= sizeof(claw_memory_session_index_header_t);
+    return idx_size / sizeof(claw_memory_session_index_entry_t) >
+           CLAW_MEMORY_SESSION_MESSAGE_LIMIT;
+}
+
 static esp_err_t session_history_compact_if_needed(const char *session_id,
                                                    const claw_core_request_t *request,
                                                    const char *data_path,
@@ -1786,7 +1896,7 @@ static esp_err_t session_history_compact_if_needed(const char *session_id,
     if (!session_id || !data_path || !idx_path) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (file_size_bytes(data_path) <= CLAW_MEMORY_SESSION_SIZE_LIMIT) {
+    if (!session_history_compaction_needed(data_path, idx_path)) {
         return ESP_OK;
     }
 
@@ -1909,7 +2019,7 @@ cleanup:
     if (idx_file && session_history_close_file(idx_file) != ESP_OK && err == ESP_OK) {
         err = ESP_FAIL;
     }
-    if (err == ESP_OK && batch->turn_completed) {
+    if (err == ESP_OK) {
         err = session_history_compact_if_needed(batch->session_id, batch->request, data_path, idx_path);
     }
     free(data_path);
