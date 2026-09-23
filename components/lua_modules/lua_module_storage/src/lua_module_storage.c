@@ -307,11 +307,16 @@ static int lua_module_storage_get_free_space(lua_State *L)
     }
 
     lua_newtable(L);
-    lua_pushinteger(L, (lua_Integer)total);
+    /* This Lua build intentionally uses 32-bit integers/floats to reduce
+     * runtime memory.  A 29 GB SD card therefore wraps when pushed as a
+     * lua_Integer.  lua_Number still carries the capacity in a useful byte
+     * value (with float-sized precision), while the C side keeps exact
+     * uint64_t arithmetic. */
+    lua_pushnumber(L, (lua_Number)total);
     lua_setfield(L, -2, "total");
-    lua_pushinteger(L, (lua_Integer)free_bytes);
+    lua_pushnumber(L, (lua_Number)free_bytes);
     lua_setfield(L, -2, "free");
-    lua_pushinteger(L, (lua_Integer)(total - free_bytes));
+    lua_pushnumber(L, (lua_Number)(total - free_bytes));
     lua_setfield(L, -2, "used");
     return 1;
 }

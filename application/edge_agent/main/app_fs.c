@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -57,10 +58,10 @@ static void log_fatfs_info(const char *base_path)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to query FATFS info for %s: %s", base_path, esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "FATFS at %s total=%u used=%u",
+        ESP_LOGI(TAG, "FATFS at %s total=%" PRIu64 " used=%" PRIu64,
                  base_path,
-                 (unsigned int)total,
-                 (unsigned int)(total - free_bytes));
+                 total,
+                 total - free_bytes);
     }
 }
 
