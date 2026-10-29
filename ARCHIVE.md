@@ -20,3 +20,7 @@ Private device configuration, raw flash/NVS backups, capture/log directories, fi
 The fixed CH340 USB device-class name and RFC1918 addresses in parser/SSRF tests are generic test fixtures, not personal device identifiers. Cargo checksums are unchanged.
 
 Validation results for this snapshot are recorded in `docs/archive/VALIDATION.md`. They do not establish a new on-device firmware acceptance run. Existing documented limitations remain applicable.
+
+## ESP-IDF changes required to reproduce the local setup
+
+The SDK also had local driver changes outside the main repository. Their exact base revision, replay instructions and patch are preserved in [docs/archive/ESP-IDF-PATCH.md](docs/archive/ESP-IDF-PATCH.md). Apply this patch before rebuilding the archived firmware.

@@ -1,0 +1,69 @@
+diff --git a/components/esp_http_client/esp_http_client.c b/components/esp_http_client/esp_http_client.c
+index 306caef188df52abf4efa488086c2d550cbc0195..09204595a3c03580ec82e7a168b0f89a717c4114 100644
+--- a/components/esp_http_client/esp_http_client.c
++++ b/components/esp_http_client/esp_http_client.c
+@@ -496,6 +496,15 @@ esp_err_t esp_http_client_set_user_data(esp_http_client_handle_t client, void *d
+     return ESP_OK;
+ }
+ 
++esp_err_t esp_http_client_set_event_handler(esp_http_client_handle_t client, http_event_handle_cb event_handler)
++{
++    if (client == NULL) {
++        return ESP_ERR_INVALID_ARG;
++    }
++    client->event_handler = event_handler;
++    return ESP_OK;
++}
++
+ static esp_err_t _set_config(esp_http_client_handle_t client, const esp_http_client_config_t *config)
+ {
+     esp_err_t ret = ESP_OK;
+diff --git a/components/esp_http_client/include/esp_http_client.h b/components/esp_http_client/include/esp_http_client.h
+index d63303c509aaf978de7810085033d7289f43d8ae..c161dfcc791411530f85f2d48be1d663d1825d36 100644
+--- a/components/esp_http_client/include/esp_http_client.h
++++ b/components/esp_http_client/include/esp_http_client.h
+@@ -526,6 +526,18 @@ esp_err_t esp_http_client_get_user_data(esp_http_client_handle_t client, void **
+  */
+ esp_err_t esp_http_client_set_user_data(esp_http_client_handle_t client, void *data);
+ 
++/**
++ * @brief      Set the event handler for the client
++ *
++ * @param[in]  client  The esp_http_client handle
++ * @param[in]  event_handler     The event handler
++ *
++ * @return
++ *     - ESP_OK
++ *     - ESP_ERR_INVALID_ARG
++ */
++esp_err_t esp_http_client_set_event_handler(esp_http_client_handle_t client, http_event_handle_cb event_handler);
++
+ /**
+  * @brief      Get HTTP client session errno
+  *
+diff --git a/components/esp_lcd/parl/esp_lcd_panel_io_parl.c b/components/esp_lcd/parl/esp_lcd_panel_io_parl.c
+index efdba5926afd82dc7bd338c4f4b8a15765679505..1c22adaa39f1e1a42ac799a7a26d3178cb45987b 100644
+--- a/components/esp_lcd/parl/esp_lcd_panel_io_parl.c
++++ b/components/esp_lcd/parl/esp_lcd_panel_io_parl.c
+@@ -115,7 +115,7 @@ esp_err_t esp_lcd_new_panel_io_parl(const esp_lcd_panel_io_parl_config_t *io_con
+         .output_clk_freq_hz = io_config->pclk_hz,
+         .trans_queue_depth = io_config->trans_queue_depth ? io_config->trans_queue_depth : 4,
+         .max_transfer_size = io_config->max_transfer_bytes,
+-        .sample_edge = PARLIO_SAMPLE_EDGE_POS,
++        .sample_edge = PARLIO_SAMPLE_EDGE_NEG,
+         .bit_pack_order = PARLIO_BIT_PACK_ORDER_MSB,
+         .dma_burst_size = io_config->dma_burst_size,
+         .flags.invert_valid_out = !io_config->flags.cs_active_high,
+diff --git a/components/usb/include/usb/usb_types_ch9.h b/components/usb/include/usb/usb_types_ch9.h
+index 500a5dc51c083f13ba0eb262e8a3e4f869e88717..fca00948ff829e2e59abd235734491c0154a251d 100644
+--- a/components/usb/include/usb/usb_types_ch9.h
++++ b/components/usb/include/usb/usb_types_ch9.h
+@@ -384,7 +384,7 @@ ESP_STATIC_ASSERT(sizeof(usb_config_desc_t) == USB_CONFIG_DESC_SIZE, "Size of us
+ /**
+  * @brief Size of a USB interface association descriptor in bytes
+  */
+-#define USB_IAD_DESC_SIZE    9
++#define USB_IAD_DESC_SIZE    8
+ 
+ /**
+  * @brief Structure representing a USB interface association descriptor
