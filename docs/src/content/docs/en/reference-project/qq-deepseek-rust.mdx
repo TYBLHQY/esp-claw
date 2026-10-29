@@ -1,0 +1,360 @@
+---
+title: Rust QQBot DeepSeek firmware
+description: Persistent memory, vision, web management, and staged acceptance for the independent GOOUUU ESP32-S3-CAM Rust firmware.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import LinkToSource from '@/components/LinkToSource.astro';
+
+The firmware in <LinkToSource relativePath="application/qq_deepseek_rust/" /> uses Rust and ESP-IDF v5.5.4 for independent hardware control and a QQBot to DeepSeek path on the GOOUUU ESP32-S3-CAM N16R8. It does not load ESP-Claw Lua, skills, the dynamic board manager, or a proxy.
+
+<Aside type="caution" title="Development acceptance status">
+  Current v0.7.0 passed SD image upload, cache reuse and reboot recovery; the user confirmed visible ordinary private, streamed private and group mixed-image messages. v0.6.1 default private text streaming and Search, v0.5.0 private Markdown/quotes and v0.5.1 real TXT attachment acceptance retain their original rounds. Original URL media sends, multi-image, voice/card/forward, physical no-card boot and sustained stability require separate tests.
+</Aside>
+
+## v0.1.0 device baseline
+
+| Item | Result |
+| --- | --- |
+| Flash and PSRAM | Device identified 16 MiB Flash and 8 MiB PSRAM; the 4 KiB volatile read/write probe passed |
+| Watchdog | Device reports watchdog_registered=true |
+| NVS | generation=2 and active_slot=1; probe sequence 3 and its nonce remained unchanged through the final firmware deployment and a DeepSeek-mode reboot |
+| Wi-Fi and time | Automatic reconnection and clock synchronization passed |
+| Reboot recovery | bot_mode=2 automatically restored 3 workers after Wi-Fi and clock readiness, and the QQ gateway reached READY |
+| On-board RGB LED | RMT LED commands passed; physical colors still await user confirmation |
+| DeepSeek | The ESP fetched the model catalog; while QQ remained READY, a local streamed short inference returned RUST_ESP_OK and passed stop plus [DONE] completion checks |
+| Concurrent control | During that inference, the slowest of 3 LED-status queries took 124 ms and the bot error count was 0; this result covers only that short test |
+| QQ | One real device receive/reply exchange occurred with received=1, sent=2, and errors=0 while the gateway stayed READY; the message type is not yet confirmed, so complete AI Q&A still awaits user acceptance |
+| Proactive notification | The ESP sent a private message to the sole owner; QQ POST returned a real message ID with sent=1 and errors=0; user receipt confirmation remains pending |
+
+## v0.2.0 implementation status
+
+The table separates initial, r1, and final r3 results, with 52 passing host tests recorded. The r3 image is 1,634,832 bytes and was written only to ota_0@0x20000; protocol recovery does not eliminate raw byte loss, and API checks do not establish complete QQ Q&A or sustained-operation acceptance.
+
+| Module | Current code behavior |
+| --- | --- |
+| Serial framing | r1 passed 120 concurrent-log and 100 network-recovery queries without timeouts; each run recovered one damaged reply by same-ID retransmission, while the cause of raw 132/136-byte gaps remains unknown |
+| QQ diagnostics | Normal op7 reconnect requests are separated from errors, with reconnects, server_reconnects, AI counters, and the latest 16 error details |
+| Web management | Initial device login, authentication, origin, and size-limit checks passed; saving model flash→pro→flash advanced NVS generation 2→3→4 while blank secret fields retained their values |
+| SD card | r1 passed 32 GB mounting, continued operation after GUI unmount, remount, and listing; r3 repeated the 64-byte exclusive-write, sync, read/compare, and delete probe without touching legacy directories |
+| Search and Fetch | r1 passed Search and Fetch of example.com; r3 web Search returned 3 sources, and Fetch of the official guide produced 10,414 context bytes and a real source; complete QQ summaries remain pending |
+| TLS memory | Earlier Search reached a 2,267-byte minimum; after mbedTLS PSRAM allocation, r1 mixed testing reached 48,359 and the current r3 mixed round reached 44,731 bytes; these distinct rounds are not sustained-operation results |
+| Reboot and duplicate commands | r1 same-ID nvs test advanced once from 3 to 4 and rejected old/missing guards and raw mutations; r3 startup retained generation=4, slot1, probe=4, the management code, automatic login, and available SD |
+| WebSocket cleanup | After 4 seconds offline and recovery, r3 stopped in 1.6901 seconds with workers=0, no failed/active cleanup, then Echo immediately reached QQ READY; exceptional timeout injection remains pending |
+| Long-operation UI | r3 device Search allowed navigation, LED on/off, bot stop, and refresh; all 3 sources remained on return, empty errors displayed correctly, and HTTP hashes of all 3 static assets matched source |
+| r3 diagnostics and control | Flash/PSRAM 4 KiB volatile checks, the 64-byte SD probe, and SSE RUST_ESP_OK passed; the slowest LED query was 104 ms during SSE and 128 ms in the network-loss/stop round |
+| Final reboot and notification | r3 reboot retained generation=4, slot1, probe=4, bot_mode=2, and the management code; Wi-Fi/time readiness restored 3 DeepSeek workers, QQ READY, and available SD with errors=0 in this run; the completion message returned a real ID, sent=1, with no retry, while receipt remains unconfirmed |
+| r3 QQ AI exchange | A later real message from the allowed owner recorded inference_started=1, completed=1, failed=0, sent rising from 1 to 2, errors=0, and READY; inference and a QQ API reply passed, but the unrecorded content does not establish both Search/Fetch commands, and receipt remains unconfirmed |
+
+## v0.3.0: memory, identity, and vision
+
+v0.3.0 completed the device checks below. The assistant identifies as CopilotLee, and actual English, Chinese, and Spanish replies followed the input language. Pages, OCR, URLs, and stored summaries do not set the response language; the management UI remains Chinese. Testing three languages is not individual verification of every language.
+
+| Feature | Code behavior and acceptance boundary |
+| --- | --- |
+| SD memory | The sole SD owner reads/writes dual CRC/revision slots in its dedicated directory and acknowledges only after sync and readback. One damaged slot can fall back; two damaged slots are not silently replaced. Limits are 32 persisted sessions and 48 KiB JSON per record |
+| Memory layers | Up to 16 explicit facts of 512 UTF-8 bytes each, a 4 KiB summary, and at most 8 recent turns/32 KiB. Sessions remain isolated by private user or group plus sender; the RAM text-cache budget is 48 KiB |
+| Automatic summaries | At 6 turns or under context-byte pressure, older completed turns are summarized while normally retaining the newest 2. Only a complete valid model summary replaces the source; failure preserves original material and is reported |
+| Missing card and faults | Background MemoryClient calls wait at most 3 seconds without blocking the board loop. RAM fallback remains available, while unknown existing data, revision conflicts, and uncertain timeout results are not silently overwritten |
+| Restart recovery | After seven actual inferences, the oldest four turns were summarized, the newest three remained, and SD revision was 25. Summary, facts, and revision matched after reboot, and the model recalled an early test comet name and explicit facts. Unsaved no-card content has no such guarantee |
+| Vision | The active model catalog declares text,image; actual ESP OCR read random letters present only in the image pixels. Input was a small local data URI; DeepSeek access to QQ CDN URLs and a full QQ vision reply are not yet verified |
+
+This round triggered automatic summaries through real DeepSeek calls, verified that clearing a conversation retained explicit facts, and confirmed empty persisted memory after forget all. SD failure and timeout counts were both 0 in this round; this does not substitute for card-removal, power-loss, or long-duration fault tests.
+
+After explicit SD unmount, web/serial memory writes returned ok=false. Real DeepSeek inference still succeeded with temporary RAM and persistence_warning; remount left the old revision, facts, and turn count unchanged. Hardware self-test and the 64-byte SD probe passed. The management code, generation=4, and probe=4 remained, and 3 DeepSeek workers plus QQ READY resumed with errors=0. The new web Memory page passed authenticated status/private-empty-preview reads; all 3 HTTP asset hashes matched source, and unauthenticated API requests returned 401.
+
+Host validation recorded 88 Rust test executions, including 15 reruns, plus 8 Python and 5 standalone SD tests passing, with Clippy passing. The 1,731,728-byte image was written only to ota_0@0x20000, and the live partition table matched the original backup. The 149,879-byte internal-RAM minimum came from local diagnostics with the bot stopped and is not directly comparable with v0.2.0 r3 QQ-concurrency measurements.
+
+The user confirmed v0.3.0 private-chat replies work. Two actual private exchanges completed inference, QQ sending, and SD saving; the web page showed revision 2 saved to SD. Actual QQ image submission remains unconfirmed.
+
+Automatic summaries make additional billed DeepSeek calls. Summaries and explicit facts enter prompts as untrusted historical data, never elevated to system instructions; assistant guesses do not become user facts, and page instructions cannot manage memory.
+
+### QQ memory commands
+
+```text
+/memory
+/remember I prefer concise answers
+/forget 1
+/forget all
+/memory compact
+/reset
+```
+
+/memory shows bounded summary, facts, and persistence state for the current session; /remember adds an explicit fact. /forget INDEX removes one fact and /forget all clears all memory. /reset clears summary and recent turns while keeping explicit facts; /stop only cancels pending results. A clear is durable only when persistence succeeds; an absent card is not reported as erased.
+
+The authenticated web memory preview is at most 8 KiB and omits session keys and recent raw chat. Stop the bot and finish background operations before web edits to avoid racing model writes; this is not a complete memory-export feature.
+
+### QQ image input
+
+The official DeepSeek [Vision guide](https://api-docs.deepseek.com/guides/vision/) documents Flash image input; check the active model catalog rather than assuming every DeepSeek model supports it. The v0.5.0 QQ implementation accepts up to 2 JPEG, PNG, GIF, or WebP images per message, with an HTTPS URL of at most 4096 bytes and declared limits of 8 MiB and 8192 pixels per side. The ESP does not download or independently measure the image, so declared metadata is not content verification.
+
+DeepSeek retrieves the image; the ESP submits bounded image content blocks. Signed attachment URLs do not enter long-term memory or ordinary logs. QQ URLs may expire or be inaccessible to DeepSeek; unsupported models or rejected inputs must be reported rather than presenting a text-only answer as image recognition.
+
+### QQ remote access and feature boundaries
+
+QQ buttons can open URLs, deliver callbacks, or send commands, but do not provide this project with a general HTTP tunnel into a LAN. Sending a 192.168.x.x link does not make the page externally reachable. [Official button reference](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/trans/msg-btn.html) Current remote status, LED, and memory operations use allow-listed QQ text commands; the web manager remains LAN-only with no public endpoint deployed.
+
+OTA updates, full memory export, and account-quota management are not implemented and are outside this acceptance.
+
+## v0.3.1 group-message fix (device and user confirmed)
+
+A captured real group event used GROUP_MESSAGE_CREATE, while the old parser handled only GROUP_AT_MESSAGE_CREATE and silently ignored the newer kind. The group allow list was also empty. After the user selected one group, only that group was added, advancing generation 4 to 5 while retaining the one allowed sender and all other settings; no group or user identifiers are published.
+
+The group-r3 correction follows the [official SDK mention gate](https://github.com/tencent-connect/qqbot-nodejs/blob/main/src/middleware/mention-gate.ts): the newer event uses mentions[].is_you === true, or a complete `<@!AppID>`/`<@AppID>` marker anywhere in content matching the configured app. READY.user.id, bot:true, nicknames, and id-only mentions are not proof; the READY identity cache is removed. Unverifiable self-mentions are ignored, and ordinary unmentioned messages do not trigger replies. GROUP_AT_MESSAGE_CREATE behavior is unchanged.
+
+The first real group-r2 positive/negative control failed: 2 group events were captured, ignored=2, and received=0. Its guard incorrectly used READY.user.id as the group mention identity. This failure remains historical evidence, separate from the subsequent group-r3 acceptance.
+
+Real group-r3 GROUP_MESSAGE_CREATE positive/negative controls passed through is_you: group_events=2, group_self_mentions=1, ignored_without_mention=1, parse_failed=0, and group_denied=0; received=1, inference_started=1, completed=1, failed=0, sent=1, errors=0, memory.saved=1, and save_failed=0. The user confirmed that @ messages receive replies and ordinary messages do not. This verifies the tested group path, not every group payload or sustained stability.
+
+The user has now confirmed replies in both the test and production groups. The production group initially recorded group_denied=1 because only the test group was allowed. After a user-selected event verified is_you=true and the same existing owner, only that production group was added: generation advanced 5→6 and allowed groups 1→2, with one owner, other settings, and r3 firmware unchanged. A real reboot retained generation 6, two allowed groups, one owner, probe 4, mode 2, and available SD; Tencent synchronized on attempt 1 and QQ READY resumed automatically. The production @ request recorded group_events=1, self_mentions=1, received=1, inference_completed=1, sent=1, errors=0, parse_failed=0, and denied=0, and the user confirmed its reply. Current configuration is generation 6/two allowed groups; the r3 first-boot generation 5 below is historical, and image hashes are unchanged.
+
+Group operation still requires both an allowed group in allow_groups and an allowed sender in allow_users. Adding a group does not authorize all members. Message-ID deduplication remains enabled, with numeric group_events, group_self_mentions, group_ignored_without_mention, group_parse_failed, and group_denied diagnostics that contain no group/sender IDs or message text.
+
+The earlier group-r1 device run remained unsynchronized after 169 seconds of online Wi-Fi; configuring only 0.pool.ntp.org blocked QQ startup. group-r2 rotates Tencent, Aliyun, Cloudflare, and pool candidates, filling the actual SDK server array while MAX_SERVERS remains 1 without an SDK rebuild. A single SNTP owner is released after 20 seconds without synchronization, followed by 1 second before the next candidate; initialization failure backs off for 5 seconds, and success retains periodic synchronization. Status includes time_server, time_sync_attempts, and time_sync_fault. PC UDP responses from all four services do not verify the ESP. On the actual group-r2 board, the initial flash boot and a real reboot both synchronized through time1.cloud.tencent.com on the first attempt (attempts=1, fault=null), then restored mode 2, QQ READY, 3 DeepSeek workers, and available SD with errors=0. Generation 5, 1 allowed group, the sole existing private sender, probe 4, and the management code survived. Backup-server timeout rotation is implemented but was not deliberately exercised.
+
+The final warning-free group-r3 build is deployed: image 1,734,784 bytes, SHA256 1a2f332bedb0ee5c11477df52e6f2b7697420a29b3e60f84eca16be4cafaeb27; ELF SHA256 d36530f3c8e865d2cc4f8a36b9cc23469fe26c3d8792fe7c9849a405557f3b24, with only ota_0 written. Its first boot synchronized through Tencent and restored QQ READY, 3 DeepSeek workers, and available SD, retaining generation 5, 1 allowed group, the sole existing owner, probe 4, and the management code. NTP source is unchanged from r2; the r2 second-boot autostart evidence stays separate. Memory, vision, and UI file hashes match their v0.3.0 acceptance.
+
+The final host record has 102 Rust test executions (36+29+6+9+22, including the 22 wire/vision runtime reruns), seven group protocol cases covered in both locations, and Clippy passing. v0.3.0 memory, restart-recovery, and blind-OCR results remain recorded by their original round; actual QQ image submission and type remain unconfirmed. Backup-NTP timeout rotation was not injected; physical no-card boot and sustained stability remain pending.
+
+## v0.4.0: Natural-language tools and SD history retrieval
+
+Say “Look up the official ESP32-S3 documentation”, “Read https://example.com/ and summarize it”, or “What comet plan did we discuss earlier?” The model chooses Search, Fetch, or SD history retrieval for the current session. Greetings and ordinary rewriting normally answer directly without an extra planning request. Tool selection is model-dependent and identical choices are not guaranteed for every wording.
+
+Each request executes at most 2 tools sequentially, then disables tools for the final answer. Natural-language web results contribute at most 4 KiB of body text per call, encoded tool results at most 8 KiB, and serialized model requests at most 48 KiB. Existing overall deadlines, cancellation, and QQ reply deadlines still apply. Online calls use DeepSeek account quota; web and historical content remain untrusted reference data.
+
+History is isolated by private user or group-plus-sender. Each session retains a ring of the latest 32 turns successfully saved to working memory; user text is clipped to 1024 bytes and assistant text to 2048 bytes at UTF-8 boundaries, with truncation marked. The sole SD owner reads and CRC-checks one record at a time and returns at most 3 snippets of 768 bytes each. There is no resident vector database or full-history RAM index. The existing 48 KiB working-cache budget is unchanged.
+
+Use `/memory search KEYWORDS` to inspect matching snippets. `/reset` and `/forget all` also clear that session's archive, syncing the deletion watermark to both manifest slots before confirming success. Unavailable SD never produces a fake successful search; history_failed and related status expose archive write failures. Raw text already replaced by pre-upgrade summaries cannot be recovered. New archives accumulate from completed post-upgrade turns.
+
+v0.4.0 r2 is deployed with a 1,809,296-byte image, 74,512 bytes larger than group-r3, with no new dependencies or background workers. The host round passed 115 test executions (including protocol cases compiled twice), Clippy, and the ESP build; bilingual docs aligned and built 90 pages. On the board, ordinary greetings used zero tools, natural Search/Fetch each invoked one correct tool, and SD archive retrieval, real restart recovery, model history retrieval, archive clear, and explicit fallback after software SD unmount passed. The first QQ-online Echo/diagnostic round measured internal minimum 86,391 bytes and LED queries at most 129.75 ms; the separate post-reboot round measured 86,351 bytes and 127.88 ms. Generation=6, two groups, one owner, probe=4, and the management code were retained. A subsequent real private QQ search recorded received=1, completed=1, failed=0, errors=0, two Search calls, and a successful archive save; the user confirmed a normal source-bearing reply. This real QQ round lowered the boot internal minimum to 53,575 bytes; afterward internal free was 129,251 bytes and PSRAM free 8,278,948 bytes. New incoming QQ Fetch/history and sustained stability remain pending; real model recall also retained recent context and is not a blind archive-only test.
+
+## v0.5.0: QQ message formats (first phase)
+
+Reception handles quotes, actual embedded bodies supplied by QQ in merged forwards, card metadata, QQ face tags, and QQ-provided voice transcripts. Audio without a transcript, files and videos are identified but explicitly unread. Ordinary card covers do not become document images; only picture-card previews enter vision. Original text plus material is capped at 8 KiB, with material capped at 4 KiB, recursion at 3 levels, nodes at 16, attachments at 4 and images at 2; limits produce truncation notices or image rejection.
+
+Quotes, forwards, cards, speech transcripts and file material remain untrusted references before the original latest input; `/reset`, `/forget all` or similar text inside them never executes a command. Group self-mention checks, both allow lists, SD session isolation and existing cache budgets remain. Signed image URLs and QQ scene tokens never enter memory or routine logs.
+
+Answers use QQ custom Markdown, preferring paragraph or line splits and closing/reopening fenced code when needed. Oversized individual inline constructs can still split, and QQ clients do not guarantee full GitHub Markdown rendering. A shared sequence budget allows at most four send attempts per trigger without reuse. Only a complete explicit HTTP 400/403/415/422 rejection allows one plain-text fallback for that part; subsequent parts remain plain text. Timeouts, transport errors, throttling and unknown delivery never replay automatically.
+
+v0.5.0 implements reception normalization and Markdown sending, passing 177 host test executions (including protocol recompilations), Clippy, the ESP build and a 90-page docs build. The image grew 16,112 bytes with no new dependency or worker; a real reboot retained QQ autostart, SD, the management password and existing access lists. The user confirmed private bold text; after the explicit quote retest, counters showed received=2, completed=1, sent=2, failed=0 and errors=0. Other real formats remain pending.
+
+## v0.5.1: Small text attachments and media replies
+
+Small QQ TXT, Markdown, CSV, JSON, log and common code files are read as untrusted references, never executed. Each message accepts at most two files, each at most 16 KiB and UTF-8 only. Raw files are not saved to SD; bounded text excerpts enter existing conversation memory. Each excerpt is at most 3 KiB, and JSON-escaped material remains inside the existing combined 4 KiB reference budget. Limits mark truncation; PDF/Word/video and untranscribed voice are never presented as understood.
+
+Downloads accept only HTTPS QQ/qpic CDN URLs supplied as QQ attachments, with no redirects or QQ/DeepSeek credentials. The existing inference worker reads files sequentially, at most 20 seconds each, before opening the model connection. Actual bytes, declared size, UTF-8 and control characters are checked. Download URLs never enter model text, memory or logs; ordinary websites still use DeepSeek Fetch.
+
+Use `/image https://PUBLIC_IMAGE_URL` or `/file https://PUBLIC_FILE_URL` to request a media reply. The ESP submits only the URL to QQ with srv_send_msg=false, then sends one passive message containing file_info. It does not cache large media or retry unknown delivery. Upload failure reports an error; final-send failure retains diagnostics. Account permission, URL accessibility and client rendering still require real tests.
+
+Actual links in files or cards/quotes supplied with the current message can be natural-language Fetch targets, remaining untrusted and subject to existing tool-count, source and deadline limits. Typing and throttled streaming are covered in v0.6.0; interactive buttons remain unfinished.
+
+v0.5.1 r1 is deployed with a 1,840,272-byte image, 30,976 bytes larger than v0.4.0 r2, with no new dependency or worker. The host round passed 232 test executions (including production protocol imports in several suites), Clippy and the ESP build. Board selftest, ordinary model answers, SD history write/read/clear, real mode=2 reboot autostart, three workers and errors=0 passed; generation=6/two groups/one owner/probe=4 and the original management password were retained. Echo-online diagnostics measured internal minimum 89,995 bytes and LED queries at most 103.70 ms; this is diagnostic evidence, not actual attachment load or sustained-operation acceptance. The actual TXT attachment now has user receipt confirmation: the bot read its filename and random probe code. SD history contains the untrusted_text_file read result, with received=2/completed=2/sent=2/errors=0 and an internal-free minimum of 98,663 bytes. Outgoing image/file permission and other formats still require separate real-chat checks.
+
+## v0.6.0: Private typing and streaming replies
+
+Ordinary private model jobs attempt one typing indicator; QQ clients determine its visible duration. Groups and memory commands skip it. Typing and answers share four passive-reply attempts per trigger; low memory or a failed indicator does not prevent normal conversation.
+
+Private `/stream PROMPT` explicitly enables progressive updates to one message, at most once a second and at most 6,000 visible bytes with a truncation marker. One progress buffer reuses the existing sender worker without per-token queues. Reasoning is never published, and configured secrets remain redacted across chunk boundaries. Groups receive ordinary complete replies; images, files and quotes never turn material text into a streaming command.
+
+Plain `/stream` prompts generate directly without automatic tool selection. Explicit `/stream /search QUERY` and `/stream /fetch URL` retrieve first and then send a complete result with actual sources in one update. Natural-language Search/Fetch/history retrieval in ordinary conversation is unchanged. `/stop` closes only the confirmed visible prefix, withholding pending text. Unknown delivery and throttling never replay; an explicit initial rejection alone permits an ordinary final-answer fallback.
+
+Host tests and ESP compilation are separate checks. Streaming access, incremental display and cancellation passed the real exchanges below for this account/client; others need separate checks. Continue/retry commands, interactive buttons and other real message formats are unfinished.
+
+v0.6.0 r1 was written only to the application at 0x20000, with a 1,855,024-byte image, 14,752 bytes larger than v0.5.1 and no new dependency or worker. The round passed 262 host test executions, Clippy, ESP compilation and the 90-page docs build. Board selftest, ordinary answers, SD archive write/read/clear, real reboot autostart, original web authentication and configuration retention passed, returning to QQ READY with three workers and errors=0. The post-reboot internal minimum was 107,291 bytes; this is not yet actual streaming-load memory acceptance.
+
+The user confirmed progressive growth of one real private QQ message. In the first round one typing POST was acknowledged, five stream updates included the final state, and one inference plus SD save completed with errors=0. Internal-free minimum was 87,135 bytes and the longest LED query was 115.57 ms. One invalid serial frame required one safe replay, with a 4.487-second gap between status records. Serial corruption is not fully eliminated, and typing visibility in the client was not separately confirmed.
+
+In the second round the user confirmed no further growth after `/stop`. Cumulative totals were nine stream updates, one completion and one cancellation, with inference completed=1/cancelled=1/failed=0. SD saves remained at one, so the cancelled partial answer was not committed as a new memory turn. This round had errors=0, internal minimum 84,175 bytes, LED queries at most 121.90 ms, and no invalid serial frame or replay. These two real exchanges do not establish sustained stability.
+
+A later 20-query idle serial check had one invalid frame and replay, taking up to 4.49 seconds. A separate 30-query diagnostic captured a short frame declaring 4,051 bytes but receiving 3,912. The next 30 queries had no invalid frame or replay and took at most 455.45 ms. The short-frame cause remains unresolved; the firmware that passed real chat was retained. QQ acknowledged the phase-completion notice, without separate user receipt confirmation.
+
+## v0.6.1: Streaming by default in private chat
+
+Ordinary private messages now update progressively without a `/stream` prefix; the old `/stream PROMPT` syntax still works. Groups retain the existing self-mention gate and send replies after generation completes. Control and memory commands keep their ordinary reply paths; image and file processing retain their previous complete-reply path.
+
+Default streaming retains natural-language Search, Fetch and SD history retrieval. Only model answer text is published, never tool arguments or reasoning. Progress freezes when tools start; the final answer includes actual sources after retrieval. Any already-confirmed short lead-in is retained before appending the post-tool answer, without rewriting displayed content. Explicit `/search` and `/fetch` also wait for the complete result and sources.
+
+The same 6,000-byte display cap, one-second update interval, single bounded buffer, 80 KiB internal-headroom gate, cancellation cleanup and no-replay rule for unknown delivery remain. No dependency or worker was added. NVS settings and group permissions are unchanged; the firmware default survives restart.
+
+v0.6.1 r1 is deployed with a 1,855,360-byte application image, 336 bytes larger than v0.6.0, writing only the application at 0x20000. The round passed 268 host test executions, Clippy, ESP compilation and the 90-page docs build; board selftest, ordinary model answers, SD archive write/read/clear, web authentication and real reboot autostart also passed. The management token and NVS generation=6/two groups/one owner/probe=4/mode=2 were retained, returning to QQ READY with three workers and errors=0. Default-streaming real-chat acceptance passed as recorded below.
+
+Without `/stream`, the user confirmed progressive story replies and a normal search answer with sources. Board totals were received=2/completed=2/sent=2/failed=0/errors=0, five stream updates and two completions. Two real Search calls and two history archives succeeded, with zero failed memory saves. This round measured internal minimum 85,451 bytes and LED queries at most 128.98 ms, with zero serial replay, invalid frame or CRC error. Group delivery retains its original path and passed the worker test; no new group fixture was requested for this round. The earlier intermittent serial short-frame cause remains unresolved.
+
+## v0.7.0: SD images and Markdown materials
+
+QQ image materials use the official prepare → COS PUT → complete flow, then send mixed Markdown with an actual returned qqbot-media:// reference. Ordinary image replies set force_verify_image_resource=true. Failures never claim visible delivery or automatically replay an unknown send. Existing `/image URL`, `/file URL`, default private text streaming and group self-mention rules retain their behavior.
+
+This version caps each SD image at 512 KiB and accepts only flat ASCII filenames under /sdcard/qq-deepseek/media/, supporting PNG, JPEG, GIF and WebP. Header checks identify formats and PNG dimensions, without replacing complete image decoding; QQ validates actual content when sending. The platform's 10 MB allowance does not establish equivalent ESP support.
+
+The SD owner computes MD5/SHA1 and reads upload data with 1 KiB chunks. HTTP PUT uses an independent connection without QQ credentials or redirects. ETag is compared before complete. No resident worker or dependency was added; SD and SDK handles retain their existing single owners.
+
+References are validated against robot identity, file digests and size, with at most 32 CRC records under SD media/cache/, synced and read back before commit. They survive restart. Local expiry conservatively starts at upload and is never extended by an unconfirmed send. Temporary preview_url and signed upload URLs are not persisted. Platform assets and corrupt cache files are not automatically deleted; local capacity exhaustion fails explicitly.
+
+```text
+/picture list
+/picture photo.png Image caption
+/picture-stream photo.png Streaming image test (private only)
+```
+
+`/picture` sends complete ordinary mixed Markdown. Private-only `/picture-stream` shows a short prefix before appending the image. The user separately confirmed visible colored-block fixtures in ordinary private, streamed private and group messages; no group streaming entry was added.
+
+Stop the bot before importing, then run `tools/media_stage.py IMAGE_PATH --name photo.png` with the ESP-IDF Python. The tool stages guarded UART chunks in .part, explicitly publishes the file, then compares ESP-computed digests. It never overwrites completed images or incomplete transfers. Alternatively, place files in that SD directory after safely powering down. No image upload form was added to the web manager.
+
+Serial maintenance provides `sd media list`, `sd media info NAME` and `sd media seed`. With the bot stopped, `bot media-upload NAME` tests upload/cache, and `bot media-upload list` queries platform material counts. Maintenance returns bounded metadata and digests without putting references or signed URLs in routine logs.
+
+Valid caches remain reusable. Refresh removes only verified local metadata that has expired or is about to expire, then creates a new record, accommodating FATFS rename without destination replacement. Original images and remote assets remain; corrupt records or leftover .tmp files fail explicitly and preserve the evidence.
+
+The real QQ image round recorded received=3/sent=3/errors=0, with two stream frames and one completion, including a first upload of a 19,492-byte image. This runtime round had a global internal-heap minimum of 74,699 bytes and a 127.49 ms maximum LED query. One invalid serial frame recovered through safe replay; the earlier short-frame root cause remains unresolved. This does not establish 512 KiB limit or sustained-stress acceptance.
+
+Final r3 firmware is 1,925,760 bytes, SHA256 `800f221122410ab87b44a30fd7b395d062c4fce34279846bc1fd89c5e52871d8`, with only the application partition updated. 284 host test executions, Clippy, ESP compilation and real reboot regressions passed, retaining both images/caches, configuration and the management token; QQ READY/workers=3/errors=0. Visible-image confirmation belongs to r2; r3 only updates cache lifecycle. Expired refresh is covered by host filesystem and production-flow tests, without changing the device clock or claiming a 90-day wait. Firmware and rollback artifacts remain in local backups.
+
+## Build and connect
+
+Start at the repository root with IDF_PATH pointing to an installed ESP-IDF v5.5.4, then load the SDK and espup environments. Application AGENTS.md and toolchain-versions.txt record the tools and development checks.
+
+```sh
+. "$IDF_PATH/export.sh"
+. "$HOME/export-esp.sh"
+cd application/qq_deepseek_rust
+cargo +esp build --release --locked --features bot
+```
+
+A build without the bot feature omits QQ and model workers; independent modules still provide board, NVS, network, and management functions. Before flashing, verify the device, partition table, and recovery backup; avoid generic flashing operations that also overwrite unknown partitions.
+
+Use the board CH340 serial connection at 115200 baud. Only one process may own the port at a time; close other monitors and serial terminals before running the tool below.
+
+```sh
+python tools/boardctl.py "status" "selftest" "nvs test" "wifi status"
+```
+
+The tool defaults to the known serial by-id path; use --port for another device. Since v0.2.0, firmware reports console.protocol=3 in status; replies still use QD2_REPLY / QD2_EVENT length-and-CRC frames, and the tool accepts legacy v0.1.0 replies; serial input is not echoed.
+
+Serial captures confirmed SDK logs inside fragmented JSON, and complete writes alone still suffered stress truncation. r1 protocol=3 passed 120 concurrent-log and 100 network-recovery queries without query timeouts, each run safely recovering one damaged reply; the recorded 132/136-byte gaps remain unexplained. Mutations require ID, CRC, and a current boot guard, and the latest reply can be retransmitted for an identical ID/request without re-execution; duplicate nvs test advanced once, and old guards, missing guards, and raw mutations were rejected. Unguarded bootstrap permits only an exact read-only whitelist; use the matching boardctl, and distinguish passing protocol recovery from eliminating raw byte loss.
+
+## Private configuration import
+
+Fill in your configuration in .private/provision.json and set its permissions to 0600. Git ignores this directory; keep credentials out of source, public logs, and command-line arguments. Every field is required; the device assigns generation during import.
+
+```json
+{
+  "version": 1,
+  "generation": 0,
+  "wifi_ssid": "YOUR_WIFI_SSID",
+  "wifi_password": "YOUR_WIFI_PASSWORD",
+  "deepseek_key": "YOUR_DEEPSEEK_API_KEY",
+  "deepseek_model": "MODEL_FROM_CATALOG",
+  "qq_app_id": "YOUR_QQ_APP_ID",
+  "qq_app_secret": "YOUR_QQ_APP_SECRET",
+  "allow_users": ["YOUR_USER_OPENID"],
+  "allow_groups": []
+}
+```
+
+Replace the placeholders with your configuration. QQ uses official Bot credentials and user openids; group messages also require the group openid in allow_groups, and an allowed group does not authorize an unlisted sender. Set the DeepSeek model to an ID available to the account.
+
+```sh
+chmod 700 .private
+chmod 600 .private/provision.json
+python tools/boardctl.py --config .private/provision.json --wait-online 90
+```
+
+The tool checks firmware identity before import and returns only redacted status. If the bot is running, issue bot stop and wait for it to stop before replacing configuration. Wi-Fi connects automatically at boot or after import; failures use retry backoff, and wifi status reports connectivity, IP, and synchronized time.
+
+## LED control and basic diagnostics
+
+The on-board LED is one WS2812 on GPIO48, driven with GRB data over RMT rather than ordinary GPIO switching. Channels are limited to 0 through 32; verify red, green, blue, and off at low brightness first.
+
+```sh
+python tools/boardctl.py --led-test
+python tools/boardctl.py "led rgb 16 0 0" "led status"
+python tools/boardctl.py "led off"
+```
+
+driver_applied is the last value successfully sent by the driver and does not replace physical observation. status also reports Flash, PSRAM, internal heap, stack margin, watchdog, and serial queue overruns; selftest runs hardware checks and reboot requests a restart.
+
+## NVS and storage behavior
+
+Configuration uses cfg0 and cfg1 slots in the qqds_v1 namespace. Only the inactive slot is written, and the active configuration changes after validation, commit, and successful readback; the other slot is still checked when one is damaged. Initialization errors never trigger automatic NVS erasure.
+
+nvs test writes a new probe sequence and random value; compare nvs.probe from status before and after reboot to verify persistence. Configuration and LED control do not depend on SD. v0.2.0 kept short history only in RAM; v0.3.0 adds the SD memory and per-session on-demand restoration described below. The new format does not scan or import legacy sessions.
+
+## QQ echo and DeepSeek
+
+These commands are available only in bot-enabled firmware. Starting a service requires connected Wi-Fi, synchronized time, and configured QQ credentials and allow lists. Validate QQ and LED control in echo mode before switching to model mode.
+
+```sh
+python tools/boardctl.py "bot start echo" "bot status"
+python tools/boardctl.py "bot stop"
+python tools/boardctl.py "deepseek probe"
+python tools/boardctl.py "deepseek status"
+python tools/boardctl.py "bot start deepseek"
+```
+
+bot stop is cooperative; before switching, wait for active_workers in bot status to reach 0, as a retained bot status object does not mean threads are still running. Local shutdown still occurs if persisting the off state to NVS fails; the error reply explains that autostart after reboot may remain enabled.
+
+deepseek probe checks authentication and the model catalog; deepseek test starts a short inference and uses API quota. Diagnostics run in the background, with completion available through deepseek status. They can run alongside EchoOnly mode; stop DeepSeek mode first and wait for existing diagnostics or notifications to finish.
+
+In an authorized QQ conversation, test /ping, /echo text, /status, /led on, /led off, /led rgb R G B, /led status, /reset, and /stop. Only model mode forwards ordinary text to DeepSeek; remote configuration, arbitrary GPIO access, and script execution are not exposed.
+
+After an explicit successful start, the intended mode is saved in the separate bot_mode key. On reboot, hardware checks, Wi-Fi, and synchronized time precede service recovery; bot stop persists off, and a missing record defaults to off. v0.3.0 reads a session from available SD when it is next accessed; memory restoration and service autostart are separate acceptance checks.
+
+The local bot notify-owner text command makes one explicit proactive notification attempt to the sole configured owner; inspect bot status or deepseek status for its result. It does not retry automatically, and neither reboot nor service autostart repeats the message. Run this command only when a notification is intended.
+
+## LAN web management
+
+v0.2.0 starts the manager after Wi-Fi connects. From the same LAN, open the HTTP address corresponding to wifi.ip in status; the page itself is public, while every /api/ status, configuration, and action request requires the management code.
+
+```sh
+python tools/boardctl.py "web pairing"
+```
+
+web pairing explicitly returns the management code only over the local serial port, never publicly through QQ or the web page. The code grants configuration access, so keep it private; the page stores it only for the current browser session, and “Lock” clears it. The current manager uses HTTP and should be accessed on a trusted LAN.
+
+The page provides overview, connection settings, and diagnostics. r1 passed login, authentication, origin, size-limit, and AI checks; on the r3 device, Search continued while the operator switched to Overview, turned the LED on, stopped the bot, turned the LED off, and refreshed, then returned to all 3 sources intact. Empty error records correctly show no current errors, and HTTP hashes of all 3 static assets match source.
+
+Stop the bot and wait for workers to exit before saving configuration. Reading configuration never returns stored passwords or keys; blank secret fields retain their existing values. Saves carry the current generation and reject stale versions, so reload before editing again; a Wi-Fi change may require finding the device on the new network, and saving alone does not re-enable the bot.
+
+## SD card support
+
+At startup, v0.2.0 makes one mount attempt on a dedicated worker. The board uses SDMMC slot1, 1-bit, and 20 MHz; mount failures do not block networking or chat, and never trigger formatting, repairs, or endless retries. There is no card-detect pin, so an error must not be interpreted as proof that no card is inserted.
+
+The new firmware performs probes, listings, and diagnostics only under /sdcard/qq-deepseek/, without scanning, migrating, or deleting legacy directories. A 32 GB card reported 30,985,420,800 bytes and passed a 64-byte exclusive-write, sync, read/compare, and delete probe; after r1 GUI unmount, QQ, web, and Wi-Fi remained available and self-test reported sd_required=false, then remount, probe, and listing passed again. This does not establish physical no-card boot or integrity of every old file.
+
+```sh
+python tools/boardctl.py "sd status"
+python tools/boardctl.py "sd test"
+python tools/boardctl.py "sd list"
+```
+
+sd mount, sd unmount, sd test, and sd list run in the background. After each operation, wait for busy=false in sd status, inspect last_result and fault, and only then start another operation. Use sd unmount before removing the card; I/O failures or an operation deadline disable further access, and cleanup failures require reboot, while serial and web status remain available.
+
+The Boot diagnostic log still contains only fixed events and numeric times and stops growing at 64 KiB. With user authorization, v0.3.0 separately stores sessions, facts, and summaries under /sdcard/qq-deepseek/memory/. Memory does not enter NVS, ordinary diagnostics, or public logs.
+
+## DeepSeek Search and Fetch
+
+Web tools call the official DeepSeek [Search / Fetch API](https://api-docs.deepseek.com/guides/search/) directly with the same DeepSeek key. In v0.4.0 ordinary text can request model-selected search, page reading, and current-session history retrieval; explicit commands remain available.
+
+```text
+/search ESP32-S3 official documentation
+/fetch https://api-docs.deepseek.com/guides/search/
+搜索：ESP32-S3 官方文档
+抓取：https://api-docs.deepseek.com/guides/search/
+```
+
+The Chinese “联网搜索” prefix is also supported. The QQ path first retrieves search summaries or page Markdown, then asks the model to summarize and appends actual source links returned for that request; web tools and serial diagnostics return sources plus a bounded preview. Retrieval is not independent verification of a page, and instructions inside a page are not treated as device commands.
+
+Search queries are limited to 128 Unicode characters; Fetch requires an HTTP/HTTPS host address and rejects clearly local addresses and URLs containing credentials, with body, context, and total-duration limits. Oversized material is explicitly truncated or rejected, and empty results, API rejections, and timeouts are reported; calls consume DeepSeek account quota.
+
+```sh
+python tools/boardctl.py "deepseek search ESP32-S3 official documentation"
+python tools/boardctl.py "deepseek fetch https://api-docs.deepseek.com/guides/search/"
+python tools/boardctl.py "deepseek status"
+```
+
+Direct diagnostics can run in EchoOnly mode; stop DeepSeek mode first and run one diagnostic at a time. QQ conversation still follows the existing allow lists, cancellation, message deadlines, and bounded short-history rules.
+
+## Errors and reconnect records
+
+v0.1.0 reproduced a normal op7 reconnect being misclassified as a Transport error; the original 6/7 cumulative errors cannot be attributed individually. v0.2.0 separately tracks reconnects, AI counts, and the latest 16 recent_errors, which reset with runtime recreation. r3 passed key stop-path device regression, but exceptional SDK-hang timeout handling, complete QQ retrieval Q&A, and sustained operation remain pending; zero counters and short tests are not substitutes.
+
+The r3 cleanup thread exclusively owns SDK resources and retires them through stop→destroy; the gateway waits at most 12 seconds, then latches a cleanup error and reboot-required state without creating another connection in that boot. After 4 seconds offline and recovery, the device stopped in 1.6901 seconds with workers=0, cleanup_failed=false, and cleanup_active=false, then Echo reached QQ READY. The SDK can still hang internally, and the exceptional cleanup-timeout branch has not been manually injected.

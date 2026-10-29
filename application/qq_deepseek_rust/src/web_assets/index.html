@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>CopilotLee · 设备管理</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="top"><div><p class="eyebrow">CopilotLee</p><h1>设备管理</h1></div><div class="top-actions"><span id="connection" class="pill">尚未连接</span><button id="logout" class="quiet" hidden>锁定</button></div></header>
+  <main>
+    <section id="unlock" class="panel unlock">
+      <p class="eyebrow">连接你的设备</p><h2>输入管理码</h2>
+      <p class="muted">管理码在本机串口中获取。它只保留在当前浏览器会话，请勿向他人提供。</p>
+      <form id="unlock-form"><label>管理码<input id="management-code" type="password" autocomplete="off" maxlength="128" required spellcheck="false"></label><button type="submit">解锁管理</button></form>
+    </section>
+    <div id="manager" hidden>
+      <nav class="tabs" aria-label="管理页面"><button data-tab="overview" class="selected">概览</button><button data-tab="settings">连接配置</button><button data-tab="memory">记忆</button><button data-tab="tools">检查与工具</button></nav>
+      <section id="overview" class="tab-page">
+        <div class="section-title"><div><h2>运行状态</h2><p id="updated" class="muted">等待设备数据</p></div><button id="refresh" class="quiet">刷新</button></div>
+        <div class="metrics"><article><span>Wi-Fi</span><strong id="wifi-state">—</strong><small id="wifi-address">—</small></article><article><span>QQ 机器人</span><strong id="bot-state">—</strong><small id="bot-counts">—</small></article><article><span>设备内存</span><strong id="heap-free">—</strong><small id="heap-min">—</small></article><article><span>SD 卡</span><strong id="sd-state">—</strong><small id="sd-detail">—</small></article></div>
+        <div class="columns"><section class="panel"><h3>机器人</h3><label>回复模式<select id="bot-mode"><option value="deepseek">DeepSeek 问答</option><option value="echo">连接测试</option></select></label><div class="actions"><button id="bot-start">启用所选模式</button><button id="bot-stop" class="quiet">停止机器人</button></div><p class="muted">切换模式会先停止当前服务。SD 持久化和重启恢复情况可在「记忆」页查看。</p></section>
+        <section class="panel"><h3>板载彩灯</h3><div class="actions"><button data-command="led on">开灯</button><button data-command="led off" class="quiet">关灯</button></div><div class="rgb-inputs"><label>红<input id="led-r" type="number" min="0" max="32" value="8"></label><label>绿<input id="led-g" type="number" min="0" max="32" value="8"></label><label>蓝<input id="led-b" type="number" min="0" max="32" value="8"></label><button id="led-apply" class="quiet">设置颜色</button></div><p id="led-state" class="muted">每个通道为 0–32，保持低亮度。</p></section></div>
+        <section class="panel"><h3>最近运行信息</h3><p id="health" class="muted">等待设备数据</p><pre id="error-summary">暂无记录</pre></section>
+      </section>
+      <section id="settings" class="tab-page" hidden>
+        <div class="section-title"><div><h2>连接配置</h2><p class="muted">保存前请先停止机器人。密码和密钥留空表示保持原值。</p></div><button id="load-config" class="quiet">重新读取</button></div>
+        <form id="config-form">
+          <div class="columns"><fieldset class="panel"><legend>Wi-Fi</legend><label>网络名称<input id="wifi-ssid" maxlength="32" autocomplete="off" required></label><label>Wi-Fi 密码<input id="wifi-password" type="password" autocomplete="new-password" maxlength="63" placeholder="留空保持原密码"></label><p id="wifi-secret-state" class="muted"></p><p class="muted">更改 Wi-Fi 后，可能需要在新网络中重新打开设备地址。</p></fieldset>
+          <fieldset class="panel"><legend>DeepSeek</legend><label>模型<input id="deepseek-model" maxlength="96" placeholder="deepseek-flash" required></label><label>API 密钥<input id="deepseek-key" type="password" maxlength="512" autocomplete="new-password" placeholder="留空保持原密钥"></label><p id="deepseek-secret-state" class="muted"></p></fieldset></div>
+          <fieldset class="panel"><legend>QQ 机器人</legend><div class="columns"><label>应用 ID<input id="qq-app-id" maxlength="128" autocomplete="off"></label><label>应用密钥<input id="qq-app-secret" type="password" maxlength="512" autocomplete="new-password" placeholder="留空保持原密钥"></label></div><div class="columns"><label>允许的用户 OpenID<textarea id="allow-users" rows="4" spellcheck="false" placeholder="每行一个"></textarea></label><label>允许的群 OpenID<textarea id="allow-groups" rows="4" spellcheck="false" placeholder="每行一个；留空禁用群聊"></textarea></label></div><p class="muted">群消息同时要求发送用户与群在允许名单中。</p></fieldset>
+          <div class="actions"><button type="submit">保存配置</button><span id="config-generation" class="muted"></span></div>
+        </form>
+      </section>
+      <section id="memory" class="tab-page" hidden>
+        <div class="section-title"><div><h2>记忆与上下文</h2><p class="muted">CopilotLee 跟随用户当前消息的语言回答，不固定使用中文。</p></div><button id="memory-refresh" class="quiet">刷新记忆状态</button></div>
+        <section class="panel"><h3>存储与恢复</h3><p class="muted">摘要、长期记忆和近期对话可保存在 SD 卡中。保存或恢复失败时，请以这里的实际状态为准。</p><pre id="memory-status">尚未读取记忆状态。</pre><div class="actions"><button id="memory-load">读取私聊记忆</button><span id="memory-operation" class="muted" role="status" aria-live="polite">等待操作</span></div><p class="muted">此处只读取配置中唯一允许用户的私聊记忆；多人或群聊请通过 QQ 查看各自会话。修改记忆和立即摘要前，请先在概览页停止机器人。</p></section>
+        <div class="columns"><section class="panel"><h3>对话摘要</h3><p id="memory-meta" class="muted">读取后显示版本与保存情况。</p><pre id="memory-summary" tabindex="0">尚未读取摘要。</pre><p id="memory-truncated" class="muted" hidden>当前为容量受限的预览，部分内容已截取。</p></section><section class="panel"><h3>长期记忆</h3><p id="memory-facts-empty" class="muted">尚未读取记忆条目。</p><ol id="memory-facts" class="memory-facts" hidden></ol></section></div>
+        <div class="columns"><section class="panel"><h3>添加或删除条目</h3><form id="memory-remember-form"><label>新增长期记忆<input id="memory-fact" maxlength="512" autocomplete="off" placeholder="例如：我偏好简洁的回答" required></label><p class="muted">单条最多 512 个 UTF-8 字节，中文通常占多个字节。</p><button type="submit">添加记忆</button></form><form id="memory-forget-form" class="memory-forget-form"><label>删除条目编号<input id="memory-fact-index" type="number" min="1" step="1" required placeholder="与上方列表编号一致"></label><button type="submit" class="quiet">删除指定记忆</button></form></section><section class="panel"><h3>整理与清除</h3><p class="muted">立即摘要会调用 DeepSeek，将较早的对话整理成摘要。</p><div class="actions"><button id="memory-compact" class="quiet">立即摘要</button><button id="memory-clear" class="quiet">清空对话上下文</button></div><p class="muted">清空上下文会删除摘要与近期对话，保留长期记忆。</p><div class="actions"><button id="memory-forget-all" class="quiet danger">忘记全部</button></div><p class="muted">忘记全部会删除当前私聊的长期记忆、摘要和近期对话。</p></section></div>
+      </section>
+      <section id="tools" class="tab-page" hidden>
+        <div class="section-title"><div><h2>检查与工具</h2><p class="muted">独立 API 检查可能需要先停止机器人，并会使用账户额度。</p></div></div>
+        <div class="columns"><section class="panel"><h3>基础检查</h3><div class="actions"><button data-command="selftest" class="quiet">硬件自检</button><button data-command="deepseek probe" class="quiet">查询可用模型</button><button data-command="deepseek test" class="quiet">测试 AI 回复</button></div></section><section class="panel"><h3>SD 卡</h3><div class="actions"><button data-command="sd mount" class="quiet">连接存储卡</button><button data-command="sd unmount" class="quiet">断开存储卡</button><button data-command="sd test" class="quiet">读写检查</button><button data-command="sd list" class="quiet">查看专用目录</button></div><p class="muted">不会自动格式化存储卡。读写检查只使用本固件的专用目录，取卡前请先断开。</p></section></div>
+        <div class="columns"><section class="panel"><h3>搜索网页</h3><form id="search-form"><label>搜索内容<input id="search-query" maxlength="128" placeholder="输入要搜索的内容" required></label><button type="submit">搜索</button></form></section><section class="panel"><h3>读取网页</h3><form id="fetch-form"><label>网页地址<input id="fetch-url" type="url" maxlength="1536" placeholder="https://example.com/article" required></label><button type="submit">读取</button></form></section></div>
+        <section class="panel"><div class="section-title"><h3>操作结果</h3><span id="operation-state" class="muted">等待操作</span></div><pre id="result" tabindex="0">结果会显示在这里。</pre></section>
+      </section>
+    </div>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+  </main>
+  <footer>CopilotLee · ESP 独立运行 · QQ 与 DeepSeek</footer>
+</body>
+</html>

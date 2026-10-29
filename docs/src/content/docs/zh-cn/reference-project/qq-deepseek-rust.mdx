@@ -1,0 +1,360 @@
+---
+title: Rust QQBot DeepSeek 固件
+description: GOOUUU ESP32-S3-CAM 独立 Rust 固件的持久记忆、看图、网页管理与分阶段验收。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import LinkToSource from '@/components/LinkToSource.astro';
+
+本固件位于 <LinkToSource relativePath="application/qq_deepseek_rust/" />，使用 Rust 与 ESP-IDF v5.5.4，为 GOOUUU ESP32-S3-CAM N16R8 提供独立的硬件控制及 QQBot 与 DeepSeek 通路。它不加载 ESP-Claw 的 Lua、技能、动态板级管理器或代理。
+
+<Aside type="caution" title="开发验收状态">
+  当前 v0.7.0 的 SD 图片上传、缓存复用与重启恢复已通过；用户确认私聊普通图文、私聊流式图文和群聊图文都显示正常。v0.6.1 私聊默认文字流式及 Search、v0.5.0 私聊 Markdown／引用、v0.5.1 真实 TXT 附件的验收按原轮保留。原 URL 媒体发送、多图、语音／卡片／转发、物理无卡开机和长期稳定性仍待逐项测试。
+</Aside>
+
+## v0.1.0 实机基线
+
+| 项目 | 结果 |
+| --- | --- |
+| Flash 与 PSRAM | 实机识别 16 MiB Flash、8 MiB PSRAM；4 KiB volatile 读写自检通过 |
+| 看门狗 | 实机状态为 watchdog_registered=true |
+| NVS | generation=2、active_slot=1；probe 序号 3 及其随机值在最终固件刷入和 DeepSeek 模式重启后均保持一致 |
+| Wi-Fi 与时间 | 自动恢复连接和校时已通过 |
+| 重启恢复 | 七轮实际推理后，最旧四轮形成摘要、最近三轮保留，SD revision=25；重启前后摘要、事实和 revision 完全一致，模型还召回早期测试彗星名及明确事实。无卡未保存内容不具备此保证 |
+| 板载 RGB 灯 | RMT 灯控命令通过；实际颜色仍待用户确认 |
+| DeepSeek | ESP 实际读取模型目录成功；QQ 保持 READY 时，本地流式短推理返回 RUST_ESP_OK，并通过 stop 与 [DONE] 完成校验 |
+| 并发控制 | 上述推理期间 3 次灯状态查询最长 124 ms，bot 错误计数为 0；此结果仅对应本次短测试 |
+| QQ | 实机已发生一轮真实收发，received=1、sent=2、errors=0，网关保持 READY；消息类型尚未确认，完整 AI 问答仍待用户验收 |
+| 主动通知 | ESP 向唯一 owner 发送私信，QQ POST 返回真实消息 ID，sent=1、errors=0；用户收件确认仍待完成 |
+
+## v0.2.0 新实现状态
+
+以下按首批、r1 和最终 r3 分层记录，主机测试已有 52 项通过。r3 镜像为 1,634,832 字节，仅写 ota_0@0x20000；协议恢复不等于原始丢段已消失，API 检查不等于 QQ 完整问答或长稳通过。
+
+| 模块 | 当前代码行为 |
+| --- | --- |
+| 串口帧 | r1 并发日志下 120 次、断网恢复时 100 次查询均无超时，各有 1 条损坏回复由同 ID 重传恢复；原始 132／136 字节丢段原因仍未定位 |
+| QQ 诊断 | op7 正常重连从错误计数中分离，新增 reconnects、server_reconnects、AI 计数及最近 16 条错误明细 |
+| 网页管理 | 首批实机登录、鉴权、来源与大小限制通过；模型 flash→pro→flash 保存使 NVS generation 2→3→4，秘密字段留空后仍保留原值 |
+| SD 卡 | r1 的 32 GB 实卡挂载、网页卸载后独立运行、重挂及列表通过；r3 再次完成 64 字节排他写、同步、读比删，旧目录未触碰 |
+| Search 与 Fetch | r1 的 Search 与 Fetch example.com 通过；r3 网页 Search 返回 3 源、Fetch 官方指南取得 10,414 字节上下文和真实来源，完整 QQ 总结仍待验 |
+| TLS 内存 | 旧 Search 最低 2,267 字节；启用 mbedTLS PSRAM 后，r1 混合轮次最低 48,359，r3 当前混合轮次最低 44,731 字节；不同轮次均不代表长稳 |
+| 重启与重复指令 | r1 同 ID nvs test 只从 3 增至 4，旧 guard、无 guard 和裸修改拒绝；r3 启动保留 generation=4、slot1、probe=4，管理员码沿用、自动登录及 SD 可用 |
+| WebSocket 清理 | r3 断网 4 秒并恢复后停止耗时 1.6901 秒，workers=0、清理未失败且不再活动，随即重启 Echo 达到 QQ READY；异常超时分支未人工注入 |
+| 长任务前端 | r3 真板 Search 等待期间已切页、开关灯、停止机器人并刷新，返回后 3 源结果仍保留，空错误正常显示；三份静态资源的板端 HTTP 哈希与源码一致 |
+| r3 自检与并发 | Flash/PSRAM 4 KiB volatile、自检 SD 64 字节读写删、SSE RUST_ESP_OK 均通过；SSE 期间 LED 查询最长 104 ms，断网停止轮次最长 128 ms |
+| 最终重启与通知 | r3 真重启保留 generation=4、slot1、probe=4、bot_mode=2 及管理码；Wi-Fi／校时后自动恢复 3 个 DeepSeek worker 与 QQ READY、SD 可用，本次 errors=0；完成私信返回真实消息 ID，sent=1，无重试，收件仍待用户确认 |
+| r3 QQ AI 来回 | 随后收到允许 owner 的 1 条真实消息，inference_started=1、completed=1、failed=0，sent 从 1 增至 2、errors=0、READY；已证明推理及 QQ API 回复，未记录正文，不能认定 Search／Fetch 两条均验收，用户收件仍待确认 |
+
+## v0.3.0：记忆、身份与看图
+
+v0.3.0 已在目标板完成下述验收。助手身份为 CopilotLee，实际英语、中文、西班牙语回复均正确跟随输入；网页、OCR、URL 和历史摘要不会被当作语言偏好，管理页当前仍使用中文。三种语言测试不代表所有语言均已逐一验证。
+
+| 功能 | 已实现代码与验收边界 |
+| --- | --- |
+| SD Memory | 单一 SD owner 在专用目录读写双槽 CRC／revision 记录；成功同步并回读后才报告保存，损坏槽回退、双坏拒绝自动覆盖，最多 32 个持久会话、每条 JSON 最多 48 KiB |
+| 记忆层次 | 最多 16 条明确事实，每条 512 UTF-8 字节；摘要最多 4 KiB；最近最多 8 轮／32 KiB，会话仍按私聊用户或群＋发言人隔离，RAM 缓存文字预算为 48 KiB |
+| 自动摘要 | 达到 6 轮或上下文预算压力时压缩较旧完整问答，通常保留最近 2 轮；只有完整有效的摘要成功返回后才替换原记录，失败保留原资料并报告状态 |
+| 无卡与故障 | MemoryClient 由后台调用，等待最多 3 秒，不阻塞板级主循环；无卡可用 RAM 降级，未知旧记录、版本冲突和结果未知的超时不会被静默覆盖 |
+| 重启恢复 | 七轮实际推理后，最旧四轮形成摘要、最近三轮保留，SD revision=25；重启前后摘要、事实和 revision 完全一致，模型还召回早期测试彗星名及明确事实。无卡未保存内容不具备此保证 |
+| 看图 | 当前模型目录声明 text,image；ESP 真实 OCR 盲测读对只出现在图像像素里的随机字母。输入为小型本机 data URI，尚未验证 QQ CDN URL 是否可由 DeepSeek 获取及完整 QQ 看图回复 |
+
+本轮通过真实 DeepSeek 调用触发自动摘要，并验证清会话保留明确事实、forget all 后内容全空且报告 persisted。测试期间 SD 失败和超时计数均为 0；这不替代拔卡、断电或长期故障测试。
+
+显式卸载 SD 后，网页／串口记忆写入返回 ok=false；真实 DeepSeek 临时 RAM 推理成功并带 persistence_warning，重新挂载后旧记录的 revision、事实和轮数未变。硬件自检及 64 字节 SD 探针通过；管理码、generation=4、probe=4 保留，恢复 3 个 DeepSeek worker 和 QQ READY 时 errors=0。新版网页 Memory 页已实测认证状态读取及私聊空预览，三份 HTTP 资源哈希匹配源码，未认证 API 返回 401。
+
+主机验证记录 Rust 测试执行 88 次（包含 15 次复跑），另有 Python 8 项及独立 SD 5 项通过，Clippy 通过。固件为 1,731,728 字节，仅写 ota_0@0x20000；实读分区表与原备份一致。内部 RAM 最低 149,879 字节属于机器人停止时的本地诊断轮，不能与 v0.2.0 r3 的 QQ 并发数据直接比较。
+
+用户已确认 v0.3.0 私聊回复正常；两轮真实私聊完成推理、QQ 发送及 SD 保存，网页显示 revision=2 已保存到 SD。实际 QQ 图片是否已发送仍未确认。
+
+Memory 的自动摘要会额外调用 DeepSeek 并使用账户额度。摘要与显式事实作为不可信历史资料加入请求，不能提升为系统指令；不把助手猜测当作用户事实，也不把网页指令当作记忆管理操作。
+
+### QQ Memory 指令
+
+```text
+/memory
+/remember 我偏好简短回答
+/forget 1
+/forget all
+/memory compact
+/reset
+```
+
+/memory 查看当前会话的有界摘要、事实和保存状态；/remember 显式加入事实；/forget INDEX 删除指定事实，/forget all 清除全部记忆。/reset 清摘要和最近问答，保留明确事实；/stop 只取消待发送结果。清除成功须以持久化结果为准，无卡不能冒充已清空 SD。
+
+网页 Memory 预览最多 8 KiB，不包含会话键或最近聊天原文；需要管理码。网页编辑须先停止机器人并等后台操作完成，避免与模型写回并发覆盖；这不是完整记忆导出功能。
+
+### QQ 图片输入
+
+DeepSeek 官方 [Vision 指南](https://api-docs.deepseek.com/guides/vision/) 支持 Flash 图片输入，支持能力必须按当前模型目录检查，不能假设所有 DeepSeek 模型都支持。v0.5.0 每条最多接 2 张 JPEG、PNG、GIF 或 WebP，图片 URL 必须为 HTTPS 且不超过 4096 字节；附件声明大小最多 8 MiB、单边最多 8192 像素。ESP 不下载或独立测量图像，这些声明不等于实际内容校验。
+
+图片由 DeepSeek 获取，ESP 只提交有界图片内容块；带签名的附件 URL 不进入长期记忆或一般日志。QQ 图链可能过期或无法被 DeepSeek 访问，模型不支持或输入被拒绝时应明确报告，不能把文字回复冒充识图。
+
+### QQ 远程入口与功能边界
+
+QQ 官方按钮可以跳转网址、回调或发送指令，但不提供本项目所需的通用 HTTP 内网隧道；发出 192.168.x.x 链接不会让外网访问到该网页。[官方按钮说明](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/trans/msg-btn.html) 当前使用允许名单内的 QQ 文字指令进行远程状态、灯控和记忆操作，网页仍在局域网，尚未部署公网入口。
+
+OTA 更新、完整 Memory 导出及账户额度管理尚未实现；不将这些功能算入本次验收。
+
+## v0.3.1 群聊修复（实机与用户确认通过）
+
+真实群事件表明 QQ 可推送 GROUP_MESSAGE_CREATE，旧解析器只处理 GROUP_AT_MESSAGE_CREATE，导致前者被静默忽略；当时允许群列表也为空。用户指定群后，只把该群加入允许名单，generation 从 4 增至 5，原来的 1 名允许发送者及其他配置不变，不公开群或用户标识。
+
+group-r3 按[腾讯官方 SDK mention gate](https://github.com/tencent-connect/qqbot-nodejs/blob/main/src/middleware/mention-gate.ts) 修正：新事件优先使用 mentions[].is_you === true，或正文任意位置完整匹配配置 AppID 的 `<@!AppID>`／`<@AppID>` 标记。不依赖 READY.user.id、bot:true、昵称或只有 id 的 mention，移除 READY 身份缓存。无法验证自身 @ 时忽略，普通未提及消息不触发；原 GROUP_AT_MESSAGE_CREATE 路径不变。
+
+group-r2 首次真实群正负控制失败：捕获 2 条群事件，ignored=2、received=0；旧 guard 错把 READY.user.id 当作群 mention ID。该失败作为历史保留，与随后 group-r3 成功验收分开记录。
+
+group-r3 真实 GROUP_MESSAGE_CREATE 的 is_you 路径正负控制通过：group_events=2、group_self_mentions=1、ignored_without_mention=1、parse_failed=0、group_denied=0；received=1、inference_started=1、completed=1、failed=0、sent=1、errors=0，memory.saved=1、save_failed=0。用户确认“@ 回复正常，普通消息不回复”。这验证了本次群链路，不代表所有群载荷或长期稳定性。
+
+测试群和正式群现均经用户确认正常。正式群最初 group_denied=1，因为原名单只有测试群；用户指定事件验证 is_you=true、发送者仍为原 owner 后，仅加入该正式群，generation 从 5 增至 6、允许群从 1 增至 2，owner 仍为 1，其他配置及 r3 固件不变。真实重启保留 generation=6、允许群=2、owner=1、probe=4、mode=2 和可用 SD，腾讯首次尝试校时并自动恢复 QQ READY。正式群 @ 请求记录 group_events=1、self_mentions=1、received=1、inference_completed=1、sent=1、errors=0、parse_failed=0、denied=0，用户确认回复正常。当前为 generation=6／2 个允许群；下述 r3 首次 generation=5 是历史记录，镜像哈希不变。
+
+群功能仍同时要求群在 allow_groups、发送者在 allow_users；加入一个群不会授权所有群成员。消息 ID 去重保持启用，并新增 group_events、group_self_mentions、group_ignored_without_mention、group_parse_failed、group_denied 数值诊断，不记录群 ID、发送者 ID 或正文。
+
+较早 group-r1 真板在 Wi-Fi 已在线 169 秒后仍未校时，只有 0.pool.ntp.org 的配置阻断了 QQ 启动。group-r2 按腾讯→阿里→Cloudflare→pool 轮换，按实际 SDK servers 数组长度填充且 MAX_SERVERS 保持 1，无须重编 SDK。单个 SNTP owner 超过 20 秒未校时便释放，1 秒后尝试下一服务；初始化失败退避 5 秒，成功后保留周期同步。状态提供 time_server、time_sync_attempts、time_sync_fault。本机 PC 的四个服务 UDP 响应不能替代 ESP 验证。group-r2 真板首次刷后及一次真实重启，均由 time1.cloud.tencent.com 首次尝试校时成功（attempts=1、fault=null），随后恢复 mode=2、QQ READY、3 个 DeepSeek worker 和可用 SD，errors=0；generation=5、1 个允许群、原唯一私聊用户、probe=4 和管理码均保留。备用服务器超时轮换已实现但未人为注入验证。
+
+最终 group-r3 无警告构建并已部署：镜像为 1,734,784 字节，SHA256 1a2f332bedb0ee5c11477df52e6f2b7697420a29b3e60f84eca16be4cafaeb27；ELF SHA256 d36530f3c8e865d2cc4f8a36b9cc23469fe26c3d8792fe7c9849a405557f3b24，只写 ota_0。首次启动由腾讯服务校时并恢复 QQ READY、3 个 DeepSeek worker 和可用 SD，generation=5、允许群=1、原唯一 owner、probe=4、管理码保留。NTP 源码与 r2 相同，r2 第二次重启的自启证据继续单独记录。Memory、Vision、UI 文件哈希与 v0.3.0 验收一致。
+
+最终主机记录 102 次 Rust 测试执行（36+29+6+9+22，含 22 个 wire／vision runtime 复跑），7 个群协议用例分别在两处覆盖，Clippy 通过。v0.3.0 的 Memory、重启恢复及盲 OCR 结果仍按原轮保留；实际 QQ 图片是否发送及类型仍未明确。备用 NTP 超时轮换未注入，物理无卡开机和长期稳定性仍待验。
+
+## v0.4.0：自然语言工具与 SD 历史检索
+
+可以直接说“帮我查一下 ESP32-S3 官方资料”“读一下 https://example.com/ 并总结”，或“之前聊过的彗星方案是什么”。模型自行选择 Search、Fetch 或当前会话的 SD 历史检索；问候和普通改写通常直接回答，不额外增加一次规划请求。工具选择由模型决定，并非每次措辞都保证相同选择。
+
+每次请求最多执行 2 次工具调用，顺序执行；达到上限后禁用工具并生成最终回答。自然语言网页结果每次最多带入 4 KiB 正文，编码后的工具结果最多 8 KiB，模型请求序列化最多 48 KiB；原来的总时限、取消和 QQ 回复期限继续生效。联网调用使用 DeepSeek 账户额度，网页及历史资料始终是不可信参考资料。
+
+历史档案按私聊用户或群＋发言人隔离，每个会话循环保存最近 32 轮已成功写入工作记忆的问答；每轮用户文字最多 1024 字节、助手文字最多 2048 字节，按 UTF-8 边界截断并标记。SD owner 逐条读取并校验 CRC，只返回最多 3 个各 768 字节的命中片段，没有常驻向量数据库或完整历史 RAM 索引。档案不会扩大原有 48 KiB 工作缓存预算。
+
+`/memory search 关键词` 可直接查看命中片段。`/reset` 和 `/forget all` 同时清理该会话历史档案；成功清除前须同步双槽删除水位。SD 不可用时不会假装检索成功，档案写入失败可通过 history_failed 等状态检查。升级前已经被摘要替换的旧原文无法恢复，新档案从升级后的完成问答开始累积。
+
+v0.4.0 r2 已部署，镜像 1,809,296 字节，比 group-r3 增加 74,512 字节；没有新增依赖或后台 worker。主机通过 115 次测试执行（含两处编译的协议用例）、Clippy 和 ESP 编译，双语文档对齐并构建 90 页。真板普通问候零工具，自然语言 Search／Fetch 各触发一次正确工具；SD 档案检索、真实重启后恢复、模型历史检索、清除档案和软件卸载 SD 时明确降级均通过。首次 QQ 在线 Echo／诊断轮内部堆最低 86,391 字节、灯查询最长 129.75 ms；独立重启后轮次分别为 86,351 字节和 127.88 ms。配置 generation=6、2 个群、1 名 owner、probe=4 和管理码保留。随后真实 QQ 私聊搜索 received=1、completed=1、failed=0、errors=0，Search 共调用 2 次，历史保存成功，用户确认收到正常带来源的回复；该真实 QQ 轮使本次开机内部堆最低降至 53,575 字节，之后可用 129,251 字节，PSRAM 可用 8,278,948 字节。Fetch／历史检索的新增 QQ 入站与长期稳定性仍待验；真板召回同时保留近期上下文，不能称为盲测纯档案召回。
+
+## v0.5.0：QQ 消息格式（第一批）
+
+接收侧支持引用、合并转发中 QQ 实际下发的正文、卡片元数据、QQ 表情和 QQ 提供的语音转写；没有转写的音频、文件和视频只识别类型并说明尚未读取内容。普通卡片封面不会当作正文图片，仅 picture 卡片的 preview 接入看图。原始文字与资料合计最多 8 KiB，其中资料最多 4 KiB、递归 3 层、16 个节点、4 个附件、2 张图片；超限会说明截断或拒绝图片。
+
+引用、转发、卡片、语音转写和文件资料均属于不可信参考，放在原始最新输入之前；其中的 `/reset`、`/forget all` 等文字不会执行成命令。群 @ 门槛、双方允许名单、SD 会话隔离和原有缓存预算保留；签名图片地址及 QQ 场景令牌不写入记忆或一般日志。
+
+回答改用 QQ 自定义 Markdown，优先按段落或换行拆分，必要时闭合并重开代码围栏；单个过长行内结构仍可能拆开，QQ 客户端也不保证完整 GitHub Markdown 显示。每次触发最多保留 4 次发送尝试，序号共享且不复用。完整收到明确 HTTP 400／403／415／422 拒绝时，当前片段回退一次纯文本，后续片段继续纯文本；超时、连接失败、限流或未知送达结果不会自动重发。
+
+v0.5.0 本批实现接收规范化和 Markdown 发送，并通过 177 次主机测试执行（含协议重复编译）、Clippy、ESP 编译和 90 页文档构建。镜像增加 16,112 字节，没有新增依赖或线程；真实重启保留 QQ 自启、SD、管理密码和原有权限。用户确认私聊粗体，补发引用后记录 received=2、completed=1、sent=2、failed=0、errors=0；其他真实格式仍待逐项验收。
+
+## v0.5.1：小文本附件与媒体回复
+
+QQ 中的小型 TXT、Markdown、CSV、JSON、日志及常见代码文件会尝试作为不可信参考资料读取，不执行代码。每条最多 2 个文件，每个最多 16 KiB，仅接受 UTF-8；原始文件不保存在 SD 上，只有有界文字摘录随对话进入原有记忆。每份摘录最多 3 KiB，JSON 转义后仍计入现有合计 4 KiB 资料预算；超限会标记截断，PDF／Word／视频和未转写语音不会冒充已理解。
+
+下载只允许 QQ 附件中的 HTTPS QQ／qpic CDN 地址，不跟随重定向，不携带 QQ 或 DeepSeek 凭据。已有推理线程逐个读取，每个文件最多 20 秒，完成或失败后才连接模型；实际字节、声明大小、UTF-8 和控制字符均会检查。下载地址不传给模型或写入记忆／日志；普通网页仍通过 DeepSeek Fetch 读取。
+
+使用 `/image https://公开图片地址` 或 `/file https://公开文件地址` 可请求媒体回复。ESP 仅把 URL 提交给 QQ 服务器，设置 srv_send_msg=false，再发送一次带 file_info 的被动消息；不缓存大媒体，也不自动重试未知送达。上传失败会说明错误，最终发送失败保留诊断；QQ 账号权限、链接可访问性和客户端显示仍须真实测试。
+
+文件内容以及当前消息中实际收到的卡片／引用链接可作为自然语言 Fetch 的地址来源，仍是参考资料且受原有工具次数、来源和时限限制。输入提示与限频流式回复见 v0.6.0；交互按钮仍待实现。
+
+v0.5.1 r1 已部署，镜像 1,840,272 字节，相对 v0.4.0 r2 增加 30,976 字节；没有新增依赖或后台线程。232 次主机测试执行（含生产协议模块重复编译）、Clippy 和 ESP 编译通过；真板自检、普通模型问答、SD 历史读写／清除、真实重启后 mode=2 自启、3 个 worker、errors=0，以及 generation=6／2 群／1 用户／probe=4 和原管理密码均保留。Echo 在线诊断的内部堆最低 89,995 字节、灯查询最长 103.70 ms；这是诊断数据，尚非真实附件负载或长期稳定性验收。v0.5.1 的真实 TXT 附件现已通过用户收件确认：机器人读到文件名和随机测试代号；SD 历史包含 untrusted_text_file 读取结果，received=2／completed=2／sent=2／errors=0，内部堆最低 98,663 字节。图片／文件发送权限及其他格式仍待逐项实聊验收。
+
+## v0.6.0：私聊输入提示与流式回复
+
+普通私聊模型请求会尝试发送一次“输入中”提示，持续时间由 QQ 客户端决定；群聊和记忆命令不发送。提示与回答共用每次触发的 4 次被动回复额度，低内存或提示失败时继续正常问答。
+
+私聊 `/stream 问题` 显式开启逐步更新，最多每秒一次、同一条消息追加内容，最多显示 6,000 字节并标记截断。使用一个进度缓冲并复用现有发送线程，没有逐 token 队列；推理内容不外发，配置密钥分块出现时仍先脱敏。群聊使用普通完整回复；携带图片、文件或引用时不把资料中的文字解释成流式命令。
+
+`/stream` 的普通问题直接生成回答，不自动选择工具；显式 `/stream /search 查询` 和 `/stream /fetch URL` 先检索，再一次性发送带真实来源的完整结果。日常对话的自然语言 Search／Fetch／历史检索不受影响。`/stop` 收尾已确认显示的部分，不继续公开尚未发送的内容；未知送达或限流不重放，明确拒绝首帧才允许完成后回退普通回答。
+
+主机测试与 ESP 编译分别验证；本账号的流式接口、客户端增量显示和取消已通过下述实聊验收，其他账号及客户端仍需另验。继续／重试命令、交互按钮和其他真实消息格式尚未完成。
+
+v0.6.0 r1 已写入 0x20000 应用分区，镜像 1,855,024 字节，比 v0.5.1 增加 14,752 字节；没有新增依赖或 worker。262 次主机测试执行、Clippy、ESP 编译及 90 页文档构建通过。板端自检、普通问答、SD 历史读写／清除、真实重启自启、原网页鉴权和配置保留均通过，恢复后 QQ READY、3 个 worker、errors=0。重启后内部堆最低 107,291 字节；这尚非真实流式负载的内存验收。
+
+真实 QQ 私聊已由用户确认同一条消息逐步增长：首轮 1 次输入提示获得 API 确认，5 次流式更新含最终完成，推理和 SD 保存各完成 1 次，errors=0，内部堆最低 87,135 字节，灯查询最长 115.57 ms。该轮串口出现 1 个无效帧并安全重取 1 次，状态记录间有 4.487 秒间隔；不能宣称串口损坏已完全消除，输入提示在客户端是否可见也尚未单独确认。
+
+第二轮用户确认 `/stop` 后不再增长；累计 9 次流式更新、1 次完成、1 次取消，推理累计 completed=1／cancelled=1／failed=0，SD 保存仍为 1 次，未把取消的半截回答提交为新记忆。该轮 errors=0，内部堆最低 84,175 字节，灯查询最长 121.90 ms，串口无无效帧或重取。这是两次实聊验收，尚非长期稳定性保证。
+
+后续空闲串口检查 20 次中又出现 1 个无效帧并重取，最长约 4.49 秒；独立 30 次诊断捕获到声明 4,051 字节、实收 3,912 字节的短帧。再后 30 次查询无坏帧或重取，最长 455.45 ms。短帧根因仍未确定，未因此修改已通过实聊的固件；本批完成通知已获 QQ 接口成功确认，用户收件未另验。
+
+## v0.6.1：私聊默认流式
+
+普通私聊不再需要 `/stream` 前缀，模型回答默认逐步更新；旧 `/stream 问题` 仍可使用。群聊继续按原来的 @ 门槛生成完整答复后发送。控制及记忆命令仍走各自的普通回复；图片和文件处理沿用原有完整回复路径。
+
+默认流式保留自然语言 Search、Fetch 和 SD 历史检索。只外发模型的正文，工具参数与推理内容不外发；模型开始调用工具时暂停进度，检索完成后更新最终答复及真实来源。若已经显示了简短开场，保留已确认部分并追加工具后的答复，不改写之前的显示。显式 `/search`、`/fetch` 也等完整结果和来源就绪后发送。
+
+沿用 6,000 字节显示上限、每秒最多一次更新、单个有界缓冲、80 KiB 内部堆余量检查、取消收尾和未知送达不重放规则，没有新增依赖或工作线程。本版本不修改 NVS 设置或群聊权限；默认值随固件重启保留。
+
+v0.6.1 r1 已部署，应用镜像 1,855,360 字节，比 v0.6.0 增加 336 字节；仅写入 0x20000 应用分区。268 次主机测试执行、Clippy、ESP 编译和 90 页文档构建通过；板端自检、普通模型问答、SD 历史读写／清除、网页管理鉴权及真实重启后自启通过。原管理码、NVS generation=6／2 群／1 用户／probe=4／mode=2 均保留，恢复后 QQ READY、3 个 worker、errors=0。默认流式实聊已通过，结果见下文。
+
+用户已在不加 `/stream` 的情况下确认故事回复逐步增长，联网搜索也收到带来源的正常回答。板端记录 received=2／completed=2／sent=2／failed=0／errors=0，共 5 次流式更新、2 次完成；真实 Search 工具调用 2 次，2 次历史归档成功，记忆保存失败为 0。这轮内部堆最低 85,451 字节、灯查询最长 128.98 ms，串口重取、无效帧和 CRC 错误均为 0。群聊沿用原路径并通过 worker 测试，没有在此轮重新要求用户提供群聊样本；此前偶发串口短帧的根因仍未解决。
+
+## v0.7.0：SD 图片与 Markdown 素材
+
+QQ 图片素材走官方 prepare → COS PUT → complete 接口，获得实际返回的 qqbot-media:// 引用后发送图文 Markdown。普通图片回复使用 force_verify_image_resource=true；失败不冒充已显示，也不自动重发未知送达。原 `/image URL`、`/file URL`、私聊默认文字流式和群聊 @ 门槛保持原有行为。
+
+本版 SD 图片每张最多 512 KiB，只读取 /sdcard/qq-deepseek/media/ 下的平级 ASCII 文件名，支持 PNG、JPEG、GIF、WebP。首部检查只能识别格式和 PNG 尺寸，不能替代完整图片解码；实际内容由 QQ 发送阶段校验。平台的 10 MB 上限不代表 ESP 已支持同等大小。
+
+SD owner 用 1 KiB 缓冲分块计算 MD5／SHA1、读取上传内容，HTTP PUT 使用独立连接，不携带 QQ 凭据或跟随跳转。上传后比对 ETag，再提交 complete；没有新增常驻线程或依赖，SD 与 SDK 句柄继续由原 owner 独占。
+
+图片引用按机器人、文件摘要和大小校验，最多保存 32 份 CRC 记录到 SD 的 media/cache/，同步并读回后提交。重启后可复用；使用保守的上传时有效期，不根据未经确认的发送延长本地有效期。不保存临时 preview_url 或上传签名地址，不自动删除平台素材或损坏缓存；新增图片超出本地容量会明确失败。
+
+```text
+/picture list
+/picture photo.png 图片说明
+/picture-stream photo.png 流式图文测试（仅私聊）
+```
+
+`/picture` 使用普通完整图文，`/picture-stream` 仅私聊可用，先显示短文字再追加图片。用户已分别确认私聊普通图文、私聊流式图文和群聊图文，三个路径均可见彩色方块测试图；群聊不增加流式入口。
+
+导入文件先停止机器人，用 ESP-IDF Python 运行 `tools/media_stage.py 图片路径 --name photo.png`。工具通过受保护的串口把文件分块写入 .part，显式完成后发布，再核对 ESP 计算的摘要；不会覆盖同名完成图片或残留传输。也可在设备安全关机后将图片放入上述 SD 目录。当前网页管理没有新增图片上传表单。
+
+串口维护提供 `sd media list`、`sd media info 文件名`、`sd media seed`；`bot media-upload 文件名` 在机器人停止时测试上传和缓存，`bot media-upload list` 只查询当前平台素材数量。维护命令只返回有界资料与摘要，图片引用及签名链接不进入一般日志。
+
+有效缓存继续复用；刷新前只移除已校验且过期或即将过期的本地元数据，再创建新记录，适配 FATFS 不覆盖目标文件的 rename 行为。完整图片与远端素材保留；损坏记录或残留 .tmp 会明确失败并保留现场。
+
+本次真实 QQ 图文轮次记录 received=3／sent=3／errors=0，流式 2 帧完成 1 次，含一张 19,492 字节图片的首次上传。该运行轮次全局内部堆最低 74,699 字节、灯查询最长 127.49 ms；1 条串口无效帧由安全重取恢复，原偶发短帧根因仍未解决。此结果不代表 512 KiB 满限或长期压力测试通过。
+
+最终 r3 固件为 1,925,760 字节，SHA256 为 `800f221122410ab87b44a30fd7b395d062c4fce34279846bc1fd89c5e52871d8`；只更新应用分区。284 次主机测试执行、Clippy、ESP 编译及真实重启回归通过，保留两张图片与缓存、配置和管理密码，QQ READY／workers=3／errors=0。图文实聊确认属于 r2，r3 仅补缓存生命周期；过期刷新分支已用主机文件系统与生产流程测试验证，没有模拟设备时钟或声称等待了 90 天。固件及回退资料保存在本机备份目录。
+
+## 编译与连接
+
+从仓库根目录开始，将 IDF_PATH 指向已安装的 ESP-IDF v5.5.4，再加载 SDK 和 espup 的环境。工具版本及开发检查见应用内的 AGENTS.md 和 toolchain-versions.txt。
+
+```sh
+. "$IDF_PATH/export.sh"
+. "$HOME/export-esp.sh"
+cd application/qq_deepseek_rust
+cargo +esp build --release --locked --features bot
+```
+
+不带 bot 功能编译时，不包含 QQ 和模型 worker；板级、NVS、网络及管理功能仍由独立模块提供。烧录前必须核对目标设备、分区表和回退备份；不要使用会顺带覆盖未知分区的通用烧录操作。
+
+使用板子的 CH340 串口，波特率为 115200。同一时间只让一个程序打开串口；运行下列工具前关闭其他 monitor 或串口终端。
+
+```sh
+python tools/boardctl.py "status" "selftest" "nvs test" "wifi status"
+```
+
+工具默认使用已知的串口 by-id 路径，其他设备可用 --port 指定。最新 v0.2.0 在 status 中声明 console.protocol=3；回复仍用 QD2_REPLY / QD2_EVENT 长度与 CRC 帧，工具兼容 v0.1.0 的旧回复；串口输入不会回显。
+
+串口已确认 SDK 日志插入分段 JSON，且仅完整写出仍曾在压力下截断。r1 的 protocol=3 实测并发日志 120 次和断网恢复 100 次均无查询超时，各 1 条损坏回复由安全重传恢复；记录中缺失的 132／136 字节仍未定位原因。修改操作要求 ID、CRC、当前 boot guard，最近一条回复可按相同 ID／请求重传而不重执行；重复 nvs test 只增加一次，旧 guard、无 guard 和裸修改均拒绝。未守卫引导仅放行精确只读白名单；请使用配套 boardctl，协议恢复通过不等于原始丢段根治。
+
+## 私密配置导入
+
+在 .private/provision.json 中填写自己的配置，并将文件权限设为 0600。此目录已被 Git 忽略；不要把密钥放进源码、公开日志或命令行参数。所有字段都必须存在，generation 由设备在导入时重新分配。
+
+```json
+{
+  "version": 1,
+  "generation": 0,
+  "wifi_ssid": "YOUR_WIFI_SSID",
+  "wifi_password": "YOUR_WIFI_PASSWORD",
+  "deepseek_key": "YOUR_DEEPSEEK_API_KEY",
+  "deepseek_model": "MODEL_FROM_CATALOG",
+  "qq_app_id": "YOUR_QQ_APP_ID",
+  "qq_app_secret": "YOUR_QQ_APP_SECRET",
+  "allow_users": ["YOUR_USER_OPENID"],
+  "allow_groups": []
+}
+```
+
+将示例占位值替换为真实配置。QQ 使用官方 Bot 凭据和用户 openid；群消息还要求群 openid 在 allow_groups 中，允许的群不会自动授权未列出的发送者。DeepSeek 模型填写账户实际可用的模型 ID。
+
+```sh
+chmod 700 .private
+chmod 600 .private/provision.json
+python tools/boardctl.py --config .private/provision.json --wait-online 90
+```
+
+导入前工具先检查固件身份，导入后只返回脱敏状态。若 bot 正在运行，先执行 bot stop 并等待停止，再替换配置。Wi-Fi 在开机或配置导入后自动连接；网络失败采用退避重试，wifi status 可查看连接、IP 和校时结果。
+
+## 灯控与基础诊断
+
+板载灯是 GPIO48 上的一颗 WS2812，使用 GRB 顺序和 RMT 数据，不能按普通 GPIO 灯控制。通道值限制为 0 到 32；先用低亮度验证红、绿、蓝及熄灭。
+
+```sh
+python tools/boardctl.py --led-test
+python tools/boardctl.py "led rgb 16 0 0" "led status"
+python tools/boardctl.py "led off"
+```
+
+driver_applied 表示驱动最后成功发送的值，不能代替实物观察。status 还报告 Flash、PSRAM、内部堆、栈水位、看门狗及串口队列溢出计数；selftest 执行硬件自检，reboot 请求重启。
+
+## NVS 与存储行为
+
+配置使用 qqds_v1 命名空间的 cfg0 和 cfg1 双槽。新配置只写非活动槽，校验、提交并回读成功后才切换；一个槽损坏时仍检查另一个槽。初始化出错不会自动擦除 NVS。
+
+nvs test 写入新的测试序号和随机值；在重启前后分别执行 status，比较 nvs.probe，可核验持久化。配置和灯控不依赖 SD；v0.2.0 的短会话仅在 RAM，v0.3.0 新增下文所述 SD Memory 和会话按需恢复。新格式不扫描或自动迁入旧工程会话。
+
+## QQ 回环与 DeepSeek
+
+以下命令只存在于带 bot 功能的固件。启动服务要求 Wi-Fi 已连接、时间已同步，且已填写 QQ 凭据和允许名单。先执行回环模式验收 QQ 与灯控，再切换模型模式。
+
+```sh
+python tools/boardctl.py "bot start echo" "bot status"
+python tools/boardctl.py "bot stop"
+python tools/boardctl.py "deepseek probe"
+python tools/boardctl.py "deepseek status"
+python tools/boardctl.py "bot start deepseek"
+```
+
+bot stop 是协作停止；切换前等待 bot status 中的 active_workers 降为 0，保留的 bot 状态对象不表示线程仍在运行。即使关闭意图写入 NVS 失败，本地停止仍会执行；错误回复会说明重启后自动启动可能尚未禁用。
+
+deepseek probe 检查鉴权和模型目录；deepseek test 发起一次短推理，会使用 API 额度。诊断在后台执行，使用 deepseek status 查看完成结果。EchoOnly 模式可以同时运行这些诊断；DeepSeek 模式需要先停止，并等待现有诊断或通知结束。
+
+在允许的 QQ 会话中，可测试 /ping、/echo 文字、/status、/led on、/led off、/led rgb R G B、/led status、/reset 和 /stop。只有模型模式将普通文字交给 DeepSeek；远程配置、任意 GPIO 和脚本执行没有开放。
+
+显式启动成功后，模式意图保存到独立的 bot_mode 键。重启时等待硬件检查、Wi-Fi 和校时就绪后恢复相同模式；bot stop 保存关闭意图，缺少记录时默认关闭。v0.3.0 的会话在再次访问时从可用 SD 读取；内存恢复与服务自动启动分开验收。
+
+本地 bot notify-owner 文字 命令只向配置中的唯一 owner 发起一次明确的主动通知；结果在 bot status 或 deepseek status 中查看。它不会自动重试，重启或自动恢复服务也不会重复发送。只有确实要发送通知时才执行此命令。
+
+## 局域网网页管理
+
+v0.2.0 在 Wi-Fi 联网后启动管理页。从同一局域网浏览器打开 status 中 wifi.ip 对应的 HTTP 地址；页面本身可打开，所有 /api/ 状态、配置和操作请求都必须使用管理码。
+
+```sh
+python tools/boardctl.py "web pairing"
+```
+
+web pairing 只通过本机串口显式返回管理码，不通过 QQ 或网页公开。管理码拥有配置权限，请私密保存；页面仅在当前浏览器会话保存它，点击“锁定”会清除。当前管理页使用 HTTP，应在可信局域网中访问。
+
+网页提供概览、连接配置和检查工具。r1 已实测登录、鉴权、来源、大小限制和 AI 诊断；r3 已在真板 Search 期间切换概览、开灯、停止机器人、关灯及刷新，返回工具页后 3 个来源的结果仍保留。空错误记录正确显示“当前没有错误信息”，三份静态资源经板端 HTTP 取回的哈希与源码一致。
+
+保存配置前先停止机器人并等待工作线程退出。网页读取配置不会返回原密码或密钥；秘密字段留空表示保留原值。保存带当前 generation，版本已变化时拒绝覆盖，重新读取再编辑；修改 Wi-Fi 后可能需要在新网络重新查找设备地址，保存本身不会自动重新启用机器人。
+
+## SD 卡适配
+
+v0.2.0 启动时只在独立 worker 中尝试挂载一次。总线使用板载 SDMMC slot1、1-bit、20 MHz；挂载失败不阻塞联网和聊天，不自动格式化、修复或无限重试。没有卡检测引脚，错误不能被直接解释为“没插卡”。
+
+新固件只在 /sdcard/qq-deepseek/ 下执行读写检查、列表和诊断日志，不扫描、迁移或删除旧系统目录。32 GB 实卡报告容量 30,985,420,800 字节，64 字节排他写、同步、读比删通过；r1 网页卸载后 QQ、Web、Wi-Fi 仍正常，自检报告 sd_required=false，重挂、自检和列表再次通过。这不等于已验证物理拔卡开机或所有旧文件完整性。
+
+```sh
+python tools/boardctl.py "sd status"
+python tools/boardctl.py "sd test"
+python tools/boardctl.py "sd list"
+```
+
+sd mount、sd unmount、sd test 和 sd list 都在后台执行。每次操作后用 sd status 等待 busy=false，再查看 last_result 和 fault，然后发下一条操作。取卡前执行 sd unmount；I/O 失败或超过操作期限后会禁用进一步读写，清理失败需要重启，状态仍可通过串口和网页查看。
+
+Boot 诊断日志仍只含固定事件和数字时间，达到 64 KiB 后停止增长；v0.3.0 经用户授权另在 /sdcard/qq-deepseek/memory/ 保存会话、事实和摘要。两种文件用途分开，记忆不写入 NVS，也不混入一般诊断或公开日志。
+
+## DeepSeek Search 与 Fetch
+
+联网工具直接调用 DeepSeek 官方 [Search / Fetch API](https://api-docs.deepseek.com/guides/search/)，使用同一 DeepSeek 密钥。v0.4.0 普通文字对话可由模型按需调用搜索、网页读取和当前会话历史检索；以下显式命令仍可使用。
+
+```text
+/search ESP32-S3 官方文档
+/fetch https://api-docs.deepseek.com/guides/search/
+搜索：ESP32-S3 官方文档
+抓取：https://api-docs.deepseek.com/guides/search/
+```
+
+也支持“联网搜索”前缀。QQ 路径先取得搜索摘要或网页 Markdown，再让模型总结并附上本次返回的真实来源链接；网页工具栏和串口诊断返回来源及有界预览。它们不代表已独立核实网页说法，也不会把网页中的指令当作设备命令。
+
+搜索词最多 128 个 Unicode 字符；Fetch 要求 HTTP/HTTPS 主机地址，拒绝明确的本地地址和带账号密码的 URL，并有正文、上下文和总时限限制。过长资料会明确截断或报超限，空结果、API 拒绝和超时会明确报告；调用会使用 DeepSeek 账户额度。
+
+```sh
+python tools/boardctl.py "deepseek search ESP32-S3 官方文档"
+python tools/boardctl.py "deepseek fetch https://api-docs.deepseek.com/guides/search/"
+python tools/boardctl.py "deepseek status"
+```
+
+直接诊断可在 EchoOnly 模式运行，DeepSeek 模式需先停止；同一时间只运行一项诊断。QQ 普通会话仍受原来的允许名单、取消、消息期限和短会话上限约束。
+
+## 错误与重连记录
+
+v0.1.0 已复现 op7 正常重连被误记为 Transport 错误；原 6／7 次累计错误无法逐条归因。v0.2.0 独立统计重连、AI 计数和最近 16 条 recent_errors，它们随运行时重建而重置。r3 已完成停止路径的关键真板回归，但 SDK 异常挂起的超时保护、完整 QQ 检索问答及长期运行仍待验，不能用计数清零或短测试替代。
+
+r3 的清理线程独占 SDK 资源并按 stop→destroy 退场；网关最多等待 12 秒，超时锁存清理错误和“需重启”，同次启动不再创建新连接。断网 4 秒恢复后的真板停止用时 1.6901 秒，workers=0、cleanup_failed=false、cleanup_active=false，随后 Echo 恢复 QQ READY；SDK 底层仍可能挂起，异常清理超时分支尚未人工注入。

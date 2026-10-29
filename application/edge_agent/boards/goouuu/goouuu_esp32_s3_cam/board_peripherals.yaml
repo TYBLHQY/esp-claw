@@ -1,0 +1,13 @@
+version: 1.0.0
+
+# The camera's SCCB control bus is the only shared peripheral bus required by
+# the base board. The parallel DVP signals are described on the camera device.
+peripherals:
+  - name: i2c_master
+    type: i2c
+    role: master
+    config:
+      port: 0
+      pins:
+        sda: 4
+        scl: 5

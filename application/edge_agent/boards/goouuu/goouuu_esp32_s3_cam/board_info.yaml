@@ -1,0 +1,5 @@
+board: goouuu_esp32_s3_cam
+chip: esp32s3
+version: 1.0.0
+description: "GOOUUU ESP32-S3-CAM (N16R8, OV2640, microSD, WS2812)"
+manufacturer: "GOOUUU"

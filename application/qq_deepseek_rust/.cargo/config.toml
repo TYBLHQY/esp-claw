@@ -1,0 +1,20 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+
+[target.'cfg(target_os = "espidf")']
+linker = "ldproxy"
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32s3"
+ESP_IDF_VERSION = "v5.5.4"
+ESP_IDF_SDKCONFIG_DEFAULTS = "sdkconfig.defaults"
+ESP_IDF_TOOLS_INSTALL_DIR = "global"
+# Mirror this CSV into esp-idf-sys's generated CMake project, so its build-time
+# table matches the CSV used by deployment tooling instead of a dummy layout.
+ESP_IDF_GLOB_BASE = { value = "", relative = true }
+ESP_IDF_GLOB_PARTITIONS = "partitions.csv"
+ESP_IDF_COMPONENT_MANAGER = "true"

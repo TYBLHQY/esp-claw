@@ -1,0 +1,60 @@
+# Build output
+build/
+tmp/
+releases/
+backups/
+
+# ESP-IDF
+sdkconfig
+sdkconfig.old
+sdkconfig.priv
+sdkconfig.bmgr_board.old
+dependencies.lock
+managed_components/
+
+# IDE / Editor
+.vscode/
+.devcontainer/
+.idea/
+.clangd
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+# Cache / Compiled
+.cache
+*.pyc
+
+# MCP / Memov
+.mcp.json
+.mem/
+.memignore
+# OS
+.DS_Store
+Thumbs.db
+.venv/
+
+.codex
+
+# Docs
+docs/node_modules
+docs/public/d2
+docs/dist
+docs/.astro
+docs/**/*.bin
+pages/simulator/node_modules
+pages/simulator/dist
+pages/simulator/*.log
+pages/simulator/public/runtime/*
+!pages/simulator/public/runtime/.gitkeep
+
+# Archive hygiene: generated and private device material never belongs in Git.
+**/target/
+**/.private/
+__pycache__/
+*.log
+*.pcap
+*.pcapng
+.archify/

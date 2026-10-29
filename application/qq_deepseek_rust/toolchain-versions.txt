@@ -1,0 +1,24 @@
+ESP-IDF: v5.5.4
+Rust distribution: esp-rs/rust-build 1.97.0.0
+rustc: 1.97.0-nightly (8ea53bcd7 2026-07-08)
+Xtensa LLVM: esp-21.1.3_20260408
+espup: 0.18.0
+ldproxy: 0.3.5
+espflash: 4.6.0
+esp-idf-svc: 0.53.0
+esp-idf-hal: 0.47.0 (transitive, locked by Cargo.lock)
+esp-idf-sys: 0.38.1 (transitive, locked by Cargo.lock)
+embuild: 0.33.5
+esp_websocket_client: 1.8.0 (official managed component; includes stop/destroy race fixes)
+
+Install the custom Rust distribution:
+  espup install --std --targets esp32s3 --toolchain-version 1.97.0.0
+
+Build after activating the existing SDK and espup environment:
+  . /path/to/esp-idf-v5.5.4/export.sh
+  . /home/example/export-esp.sh
+  cd application/qq_deepseek_rust
+  cargo +esp build --release --locked
+
+This file contains tool versions, not credentials. Do not run a flash command
+without choosing the explicit partitions.csv and verifying the target device.

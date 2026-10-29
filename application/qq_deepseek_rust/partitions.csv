@@ -1,0 +1,9 @@
+# Preserve the original board's partition offsets for reliable rollback.
+# Name,    Type, SubType, Offset,   Size
+nvs,       data, nvs,     0xA000,   0x6000
+otadata,   data, ota,     0x10000,  0x2000
+phy_init,  data, phy,     0x12000,  0x1000
+ota_0,     app,  ota_0,   0x20000,  5M
+ota_1,     app,  ota_1,   0x520000, 5M
+system,    data, fat,     0xA20000, 2600K
+storage,   data, fat,     0xCAA000, 3M
